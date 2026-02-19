@@ -78,11 +78,11 @@ fn agent_new_and_rm_clean_should_not_require_force() {
             "show-ref",
             "--verify",
             "--quiet",
-            "refs/heads/agent/agent-a",
+            "refs/heads/agent-a",
         ])
         .status()
         .unwrap();
-    assert!(!status.success(), "agent branch should be deleted");
+    assert!(status.success(), "agent branch should remain");
 }
 
 #[test]
@@ -122,6 +122,50 @@ fn agent_rm_without_force_should_fail_if_user_left_untracked_files() {
         ])
         .assert()
         .failure();
+}
+
+#[test]
+fn agent_rm_should_succeed_with_common_generated_dirs() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    init_repo(&repo);
+
+    let agents = td.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .current_dir(&repo)
+        .args([
+            "agent",
+            "new",
+            "agent-a",
+            "--no-up",
+            "--no-open",
+            "--base-dir",
+            agents.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let worktree = agents.join("agent-a");
+    std::fs::create_dir_all(worktree.join(".venv")).unwrap();
+    std::fs::write(worktree.join(".venv").join("pyvenv.cfg"), "x").unwrap();
+    std::fs::create_dir_all(worktree.join("node_modules")).unwrap();
+    std::fs::write(worktree.join("node_modules").join(".keep"), "x").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .current_dir(&repo)
+        .args([
+            "agent",
+            "rm",
+            "agent-a",
+            "--base-dir",
+            agents.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(!worktree.exists(), "worktree dir should be removed");
 }
 
 #[test]

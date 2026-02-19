@@ -51,4 +51,3 @@ fn templates_compose_pnpm_implies_node() {
     let devcontainer = fs::read_to_string(base.join("devcontainer.json")).unwrap();
     assert!(devcontainer.contains("devcontainers/features/node"));
 }
-
