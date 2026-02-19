@@ -1,0 +1,15 @@
+{
+  "features": {
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "{{go.version}}"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go"
+      ]
+    }
+  }
+}
+

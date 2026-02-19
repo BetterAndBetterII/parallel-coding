@@ -84,10 +84,12 @@ struct TemplatesArgs {
 
 #[derive(Subcommand, Debug)]
 enum TemplatesCommands {
-    /// Install embedded presets into $HOME/.pc/templates for customization
+    /// Install embedded templates + component sources into $HOME/.pc/templates
     Init(TemplatesInitArgs),
-    /// Compose a custom template from selected stacks (writes to $HOME/.pc/templates/<name>/)
+    /// Compose a custom template from selected components (writes to $HOME/.pc/templates/<name>/)
     Compose(TemplatesComposeArgs),
+    /// Interactive templates manager (browse/compose/edit)
+    Tui,
 }
 
 #[derive(Args, Debug)]
@@ -97,23 +99,16 @@ struct TemplatesInitArgs {
     force: bool,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug)]
-enum StackComponent {
-    Python,
-    Uv,
-    Go,
-    Node,
-    Pnpm,
-    Desktop,
-}
-
 #[derive(Args, Debug)]
 struct TemplatesComposeArgs {
     /// Template name (directory under $HOME/.pc/templates/)
     name: String,
     /// Components to include (can be repeated)
-    #[arg(long = "with", value_enum)]
-    with_components: Vec<StackComponent>,
+    #[arg(long = "with")]
+    with_components: Vec<String>,
+    /// Set component/profile parameters (key=value). Can be repeated.
+    #[arg(long = "set")]
+    set: Vec<String>,
     /// Select components interactively (TUI)
     #[arg(long)]
     interactive: bool,
@@ -205,12 +200,13 @@ fn cmd_templates(args: TemplatesArgs) -> Result<()> {
     match args.command {
         TemplatesCommands::Init(a) => cmd_templates_init(a),
         TemplatesCommands::Compose(a) => cmd_templates_compose(a),
+        TemplatesCommands::Tui => cmd_templates_tui(),
     }
 }
 
 fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
     for preset in templates::embedded_presets() {
-        let dir = match templates::install_embedded_preset(preset, args.force) {
+        let dir = match templates::install_embedded_preset(&preset, args.force) {
             Ok(d) => d,
             Err(e)
                 if !args.force
@@ -228,67 +224,183 @@ fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
                     println!("Skipped preset {preset} (left existing files).");
                     continue;
                 }
-                templates::install_embedded_preset(preset, true)?
+                templates::install_embedded_preset(&preset, true)?
             }
             Err(e) => return Err(e),
         };
         println!("Installed preset {preset} into {}", dir.display());
     }
-    println!("Edit templates under $HOME/.pc/templates/<preset>/ to customize.");
+
+    for profile in templates::embedded_profile_names() {
+        let dir = match templates::install_embedded_preset(&profile, args.force) {
+            Ok(d) => d,
+            Err(e)
+                if !args.force
+                    && can_prompt()
+                    && e.downcast_ref::<templates::ForceRequired>().is_some() =>
+            {
+                let ok = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!(
+                        "Template files already exist for profile {profile}. Overwrite? (equivalent to --force)"
+                    ))
+                    .default(false)
+                    .interact()
+                    .context("Prompt failed")?;
+                if !ok {
+                    println!("Skipped profile {profile} (left existing files).");
+                    continue;
+                }
+                templates::install_embedded_preset(&profile, true)?
+            }
+            Err(e) => return Err(e),
+        };
+        println!("Installed profile {profile} into {}", dir.display());
+    }
+
+    let components_dir = match templates::install_embedded_components(args.force) {
+        Ok(d) => d,
+        Err(e)
+            if !args.force
+                && can_prompt()
+                && e.downcast_ref::<templates::ForceRequired>().is_some() =>
+        {
+            let ok = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Component sources already exist under {}. Overwrite? (equivalent to --force)",
+                    templates_dir_hint(".components")?.display()
+                ))
+                .default(false)
+                .interact()
+                .context("Prompt failed")?;
+            if ok {
+                templates::install_embedded_components(true)?
+            } else {
+                println!("Skipped components install (left existing files).");
+                templates_dir_hint(".components")?
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    println!(
+        "Installed embedded components into {}",
+        components_dir.display()
+    );
+
+    let profiles_dir = match templates::install_embedded_profiles(args.force) {
+        Ok(d) => d,
+        Err(e)
+            if !args.force
+                && can_prompt()
+                && e.downcast_ref::<templates::ForceRequired>().is_some() =>
+        {
+            let ok = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Profile sources already exist under {}. Overwrite? (equivalent to --force)",
+                    templates_dir_hint(".profiles")?.display()
+                ))
+                .default(false)
+                .interact()
+                .context("Prompt failed")?;
+            if ok {
+                templates::install_embedded_profiles(true)?
+            } else {
+                println!("Skipped profiles install (left existing files).");
+                templates_dir_hint(".profiles")?
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    println!(
+        "Installed embedded profiles into {}",
+        profiles_dir.display()
+    );
+
+    println!("Edit templates under $HOME/.pc/templates/<preset>/ to customize output templates.");
+    println!("Edit component sources under $HOME/.pc/templates/.components/.");
+    println!("Edit profile sources under $HOME/.pc/templates/.profiles/.");
     println!("Tip: set PC_HOME=/some/dir to override $HOME/.pc.");
     Ok(())
 }
 
 fn cmd_templates_compose(args: TemplatesComposeArgs) -> Result<()> {
-    let mut spec = templates::StackSpec::default();
+    let mut components: Vec<String> = Vec::new();
+    let mut params = parse_key_value_args(&args.set)?;
 
     if args.interactive {
         if !can_prompt() {
             bail!("--interactive requires a TTY");
         }
 
-        let items = vec![
-            ("Python", "Python runtime + pip"),
-            ("UV", "uv (Python package manager)"),
-            ("Go", "Go toolchain"),
-            ("Node", "Node.js"),
-            ("pnpm", "pnpm (via corepack, requires Node)"),
-            ("Desktop", "webtop sidecar in compose (profile: desktop)"),
-        ];
-        let labels: Vec<String> = items.iter().map(|(a, b)| format!("{a} - {b}")).collect();
-        let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Select components for this template")
-            .items(&labels)
-            .interact()
-            .context("TUI selection failed")?;
+        let manifests = templates::component_manifests()?;
+        let mut by_cat: std::collections::BTreeMap<String, Vec<templates::ComponentManifest>> =
+            std::collections::BTreeMap::new();
+        for m in manifests
+            .into_iter()
+            .filter(|m| m.id != "base/devcontainer")
+        {
+            let cat = if m.category.is_empty() {
+                "Other".to_string()
+            } else {
+                m.category.clone()
+            };
+            by_cat.entry(cat).or_default().push(m);
+        }
 
-        for idx in selection {
-            match idx {
-                0 => spec.python = true,
-                1 => spec.uv = true,
-                2 => spec.go = true,
-                3 => spec.node = true,
-                4 => spec.pnpm = true,
-                5 => spec.desktop = true,
-                _ => {}
+        let cat_order = vec!["Language", "Tool", "Toolchain", "Service", "Extra", "Other"];
+        for cat in cat_order {
+            let Some(items) = by_cat.get_mut(cat) else {
+                continue;
+            };
+            items.sort_by(|a, b| a.name.cmp(&b.name));
+            let labels: Vec<String> = items
+                .iter()
+                .map(|m| format!("{} - {}", m.name, m.description))
+                .collect();
+            let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Select {cat} components (optional)"))
+                .items(&labels)
+                .interact()
+                .context("TUI selection failed")?;
+            for idx in selection {
+                components.push(items[idx].id.clone());
+            }
+        }
+
+        let defs = templates::component_param_defs(&components)?;
+        for def in defs {
+            if params.contains_key(&def.key) {
+                continue;
+            }
+            if def.choices.is_empty() {
+                let v = dialoguer::Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt(def.prompt)
+                    .default(def.default)
+                    .interact_text()
+                    .context("Prompt failed")?;
+                params.insert(def.key, v);
+            } else {
+                let mut choices = def.choices.clone();
+                if !choices.contains(&def.default) {
+                    choices.insert(0, def.default.clone());
+                }
+                let idx = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt(def.prompt)
+                    .items(&choices)
+                    .default(0)
+                    .interact()
+                    .context("Prompt failed")?;
+                params.insert(def.key, choices[idx].clone());
             }
         }
     }
 
     for c in &args.with_components {
-        match c {
-            StackComponent::Python => spec.python = true,
-            StackComponent::Uv => spec.uv = true,
-            StackComponent::Go => spec.go = true,
-            StackComponent::Node => spec.node = true,
-            StackComponent::Pnpm => spec.pnpm = true,
-            StackComponent::Desktop => spec.desktop = true,
-        }
+        components.push(c.clone());
     }
 
-    spec.normalize();
+    let spec = templates::ComposeSpec { components, params };
 
-    let dir = match templates::write_composed_preset(&args.name, spec.clone(), args.force) {
+    let dir = match templates::write_composed_template(&args.name, spec.clone(), args.force) {
         Ok(d) => d,
         Err(e)
             if !args.force
@@ -307,12 +419,63 @@ fn cmd_templates_compose(args: TemplatesComposeArgs) -> Result<()> {
                 println!("Cancelled. Left existing template {}", args.name);
                 return Ok(());
             }
-            templates::write_composed_preset(&args.name, spec, true)?
+            templates::write_composed_template(&args.name, spec, true)?
         }
         Err(e) => return Err(e),
     };
 
     println!("Wrote composed template into {}", dir.display());
+    Ok(())
+}
+
+fn cmd_templates_tui() -> Result<()> {
+    if !can_prompt() {
+        bail!("templates tui requires a TTY");
+    }
+    loop {
+        let items = vec![
+            "Compose new template",
+            "Edit existing template file",
+            "Edit component source file",
+            "Edit profile source (profile.toml)",
+            "Render a profile into a template dir",
+            "Install embedded templates/components/profiles",
+            "Exit",
+        ];
+        let idx = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Templates manager")
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("TUI selection failed")?;
+        match idx {
+            0 => {
+                let name = dialoguer::Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Template name")
+                    .interact_text()
+                    .context("Prompt failed")?;
+                let args = TemplatesComposeArgs {
+                    name,
+                    with_components: Vec::new(),
+                    set: Vec::new(),
+                    interactive: true,
+                    force: false,
+                };
+                cmd_templates_compose(args)?;
+            }
+            1 => {
+                edit_template_file_tui()?;
+            }
+            2 => edit_component_file_tui()?,
+            3 => edit_profile_file_tui()?,
+            4 => render_profile_to_template_tui()?,
+            5 => {
+                cmd_templates_init(TemplatesInitArgs { force: false })?;
+            }
+            6 => break,
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -620,7 +783,7 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
 
     let needs_overwrite = files
         .iter()
-        .any(|(name, _)| devcontainer_dir.join(name).exists());
+        .any(|f| devcontainer_dir.join(&f.rel_path).exists());
     let overwrite_all = if force {
         true
     } else if needs_overwrite {
@@ -648,15 +811,19 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
         false
     };
 
-    for (name, contents) in files {
-        let target = devcontainer_dir.join(&name);
+    for f in files {
+        let target = devcontainer_dir.join(&f.rel_path);
         if target.exists() && !overwrite_all {
             bail!(
                 "{} already exists. Use --force to overwrite.",
                 target.display()
             );
         }
-        std::fs::write(&target, contents).with_context(|| {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&target, &f.bytes).with_context(|| {
             format!(
                 "Failed to write preset file {} to {}",
                 preset,
@@ -665,6 +832,294 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn edit_template_file_tui() -> Result<()> {
+    let base = templates_root_dir()?;
+    let mut templates = Vec::new();
+    for entry in
+        std::fs::read_dir(&base).with_context(|| format!("Failed to read {}", base.display()))?
+    {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.starts_with('.') || name == "runtime" {
+            continue;
+        }
+        if p.join("devcontainer.json").exists() {
+            templates.push(name.to_string());
+        }
+    }
+    templates.sort();
+    if templates.is_empty() {
+        bail!("No templates found under {}", base.display());
+    }
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a template to edit")
+        .items(&templates)
+        .default(0)
+        .interact()
+        .context("Prompt failed")?;
+    let tdir = base.join(&templates[idx]);
+
+    let mut files = Vec::new();
+    for f in walk_dir_files(&tdir)? {
+        let rel = f.strip_prefix(&tdir)?.to_string_lossy().to_string();
+        files.push(rel);
+    }
+    files.sort();
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a file to edit")
+        .items(&files)
+        .default(0)
+        .interact()
+        .context("Prompt failed")?;
+    let path = tdir.join(&files[idx]);
+    open_in_editor(&path)?;
+    Ok(())
+}
+
+fn edit_component_file_tui() -> Result<()> {
+    let base = templates_root_dir()?.join(".components");
+    if !base.exists() {
+        bail!(
+            "No component sources found under {}. Run `pc templates init` first.",
+            base.display()
+        );
+    }
+
+    let mut ids = Vec::new();
+    for f in walk_dir_files(&base)? {
+        if f.file_name().and_then(|s| s.to_str()) != Some("component.toml") {
+            continue;
+        }
+        let parent = f.parent().unwrap_or(&base);
+        let rel = parent.strip_prefix(&base)?;
+        let id = rel.to_string_lossy().to_string();
+        if !id.is_empty() {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        bail!("No components found under {}", base.display());
+    }
+
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a component to edit")
+        .items(&ids)
+        .default(0)
+        .interact()
+        .context("Prompt failed")?;
+    let cdir = base.join(&ids[idx]);
+
+    let mut files = Vec::new();
+    for f in walk_dir_files(&cdir)? {
+        let rel = f.strip_prefix(&cdir)?.to_string_lossy().to_string();
+        files.push(rel);
+    }
+    files.sort();
+    if files.is_empty() {
+        bail!("Component dir is empty: {}", cdir.display());
+    }
+
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a file to edit")
+        .items(&files)
+        .default(0)
+        .interact()
+        .context("Prompt failed")?;
+    open_in_editor(&cdir.join(&files[idx]))?;
+    Ok(())
+}
+
+fn edit_profile_file_tui() -> Result<()> {
+    let base = templates_root_dir()?.join(".profiles");
+    if !base.exists() {
+        bail!(
+            "No profile sources found under {}. Run `pc templates init` first.",
+            base.display()
+        );
+    }
+    let mut profiles = Vec::new();
+    for entry in
+        std::fs::read_dir(&base).with_context(|| format!("Failed to read {}", base.display()))?
+    {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if p.join("profile.toml").exists() {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !name.is_empty() {
+                profiles.push(name.to_string());
+            }
+        }
+    }
+    profiles.sort();
+    if profiles.is_empty() {
+        bail!("No profiles found under {}", base.display());
+    }
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a profile to edit")
+        .items(&profiles)
+        .default(0)
+        .interact()
+        .context("Prompt failed")?;
+    open_in_editor(&base.join(&profiles[idx]).join("profile.toml"))?;
+    Ok(())
+}
+
+fn render_profile_to_template_tui() -> Result<()> {
+    let base = templates_root_dir()?.join(".profiles");
+    if !base.exists() {
+        bail!(
+            "No profile sources found under {}. Run `pc templates init` first.",
+            base.display()
+        );
+    }
+    let mut profiles = Vec::new();
+    for entry in
+        std::fs::read_dir(&base).with_context(|| format!("Failed to read {}", base.display()))?
+    {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if p.join("profile.toml").exists() {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !name.is_empty() {
+                profiles.push(name.to_string());
+            }
+        }
+    }
+    profiles.sort();
+    if profiles.is_empty() {
+        bail!("No profiles found under {}", base.display());
+    }
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select a profile to render into $HOME/.pc/templates/<name>/")
+        .items(&profiles)
+        .default(0)
+        .interact()
+        .context("Prompt failed")?;
+    let profile = profiles[idx].clone();
+
+    let name = dialoguer::Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt("Output template name")
+        .default(profile.clone())
+        .interact_text()
+        .context("Prompt failed")?;
+
+    let ok = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Render profile {profile} into template directory {name}?"
+        ))
+        .default(true)
+        .interact()
+        .context("Prompt failed")?;
+    if !ok {
+        return Ok(());
+    }
+
+    let out_dir = templates_root_dir()?.join(&name);
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("Failed to create {}", out_dir.display()))?;
+    let files = templates::preset_files(&profile)?;
+
+    let needs_overwrite = files.iter().any(|f| out_dir.join(&f.rel_path).exists());
+    if needs_overwrite {
+        let ok = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "Some files already exist under {}. Overwrite them?",
+                out_dir.display()
+            ))
+            .default(false)
+            .interact()
+            .context("Prompt failed")?;
+        if !ok {
+            println!("Cancelled. Left existing {}", out_dir.display());
+            return Ok(());
+        }
+    }
+
+    for f in files {
+        let target = out_dir.join(&f.rel_path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&target, &f.bytes)
+            .with_context(|| format!("Failed to write {}", target.display()))?;
+    }
+
+    let dir = out_dir;
+    println!("Rendered into {}", dir.display());
+    Ok(())
+}
+
+fn templates_root_dir() -> Result<PathBuf> {
+    let pc_home = std::env::var_os("PC_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pc")))
+        .ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
+    Ok(pc_home.join("templates"))
+}
+
+fn templates_dir_hint(suffix: &str) -> Result<PathBuf> {
+    Ok(templates_root_dir()?.join(suffix))
+}
+
+fn open_in_editor(path: &Path) -> Result<()> {
+    let editor = std::env::var("EDITOR").ok();
+    let editor = editor.unwrap_or_else(|| "vi".to_string());
+    let mut cmd = Command::new(&editor);
+    cmd.arg(path);
+    run_ok(cmd).with_context(|| format!("Failed to open editor {editor}"))?;
+    Ok(())
+}
+
+fn parse_key_value_args(items: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for item in items {
+        let Some((k, v)) = item.split_once('=') else {
+            bail!("--set must be key=value, got: {item}");
+        };
+        if k.trim().is_empty() {
+            bail!("--set key cannot be empty: {item}");
+        }
+        out.insert(k.trim().to_string(), v.to_string());
+    }
+    Ok(out)
+}
+
+fn walk_dir_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return Ok(out);
+    }
+    for entry in
+        std::fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("Failed to read entry under {}", root.display()))?;
+        let path = entry.path();
+        let meta = entry
+            .metadata()
+            .with_context(|| format!("Failed to stat {}", path.display()))?;
+        if meta.is_dir() {
+            out.extend(walk_dir_files(&path)?);
+        } else if meta.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(out)
 }
 
 fn devcontainer_up(

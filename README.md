@@ -31,13 +31,19 @@ pc --help
 
 ### 0) （可选）把默认模板安装到 `$HOME/.pc` 方便自定义
 
-默认内置一个 `python-uv` 模板；如果你想在全局复用并可修改它：
+默认内置一个 `python-uv` 模板（并额外内置 `node-pnpm`、`polyglot` 等 profile）；如果你想在全局复用并可修改：
 
 ```bash
 pc templates init
 ```
 
-会写入：`$HOME/.pc/templates/python-uv/{devcontainer.json,compose.yaml,Dockerfile}`（可用环境变量 `PC_HOME` 覆盖 `$HOME/.pc`）。
+会写入：
+
+- 输出模板：`$HOME/.pc/templates/<name>/...`（例如 `python-uv/`）
+- 组件源码：`$HOME/.pc/templates/.components/<component-id>/...`
+- Profile 源码：`$HOME/.pc/templates/.profiles/<profile>/profile.toml`
+
+（可用环境变量 `PC_HOME` 覆盖 `$HOME/.pc`）
 
 你也可以把常见技术栈“自由拼装”成一个新模板（仅生成你选择的部分，避免引入不需要的依赖）：
 
@@ -48,13 +54,38 @@ pc templates compose my-stack --interactive
 或非交互：
 
 ```bash
+pc templates compose my-stack --with lang/python --with tool/python/uv --with lang/node --with tool/node/pnpm --with lang/go
+```
+
+带参数（例如选择版本）：
+
+```bash
+pc templates compose my-stack --with lang/python --set python.version=3.12 --with lang/node --set node.version=20
+```
+
+也可以继续用旧的简写（会自动映射到 component id）：
+
+```bash
 pc templates compose my-stack --with python --with uv --with node --with pnpm --with go
+```
+
+模板生成后可以用管理界面浏览/编辑：
+
+```bash
+pc templates tui
 ```
 
 ### 1) 初始化当前目录的 devcontainer（如果还没有）
 
 ```bash
 pc init . --preset python-uv
+```
+
+也可以直接用内置 profile（无需先 `templates init`）：
+
+```bash
+pc init . --preset node-pnpm
+pc init . --preset polyglot
 ```
 
 ### 2) 从当前 git 仓库创建一个隔离的 worktree + 分支并启动 devcontainer

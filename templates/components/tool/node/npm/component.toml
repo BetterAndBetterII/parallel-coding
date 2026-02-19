@@ -1,0 +1,6 @@
+id = "tool/node/npm"
+name = "npm cache"
+description = "npm cache volume + env (Node built-in)"
+category = "Tool"
+depends = ["lang/node"]
+

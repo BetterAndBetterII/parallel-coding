@@ -1,0 +1,5 @@
+id = "tool/cpp/clang"
+name = "Clang/LLVM"
+description = "clang + lldb"
+category = "Toolchain"
+

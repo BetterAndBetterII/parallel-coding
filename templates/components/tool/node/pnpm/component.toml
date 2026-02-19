@@ -1,0 +1,11 @@
+id = "tool/node/pnpm"
+name = "pnpm"
+description = "pnpm via corepack + caches"
+category = "Tool"
+depends = ["lang/node"]
+
+[[params]]
+key = "pnpm.version"
+prompt = "pnpm version (via corepack)"
+default = "latest"
+

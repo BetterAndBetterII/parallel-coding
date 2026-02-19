@@ -1,0 +1,11 @@
+id = "lang/python"
+name = "Python"
+description = "Python runtime via devcontainers feature"
+category = "Language"
+
+[[params]]
+key = "python.version"
+prompt = "Python version"
+default = "3.13"
+choices = ["3.11", "3.12", "3.13"]
+

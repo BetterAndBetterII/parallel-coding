@@ -1,0 +1,5 @@
+id = "tool/cpp/build-essential"
+name = "Build Tools (gcc)"
+description = "build-essential + cmake + ninja + pkg-config"
+category = "Toolchain"
+

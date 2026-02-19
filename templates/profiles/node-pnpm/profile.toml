@@ -1,0 +1,8 @@
+name = "node-pnpm"
+components = [
+  "base/devcontainer",
+  "lang/node",
+  "tool/node/pnpm",
+  "extra/desktop",
+]
+

@@ -74,12 +74,7 @@ fn agent_new_and_rm_clean_should_not_require_force() {
 
     let status = StdCommand::new("git")
         .current_dir(&repo)
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/heads/agent-a",
-        ])
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/agent-a"])
         .status()
         .unwrap();
     assert!(status.success(), "agent branch should remain");

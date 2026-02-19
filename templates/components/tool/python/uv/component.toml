@@ -1,0 +1,6 @@
+id = "tool/python/uv"
+name = "uv"
+description = "uv (Python package manager) + caches"
+category = "Tool"
+depends = ["lang/python"]
+

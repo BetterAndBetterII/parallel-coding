@@ -1,0 +1,5 @@
+id = "extra/desktop"
+name = "Desktop Sidecar (webtop)"
+description = "Optional webtop sidecar in docker compose (profile: desktop)"
+category = "Extra"
+
