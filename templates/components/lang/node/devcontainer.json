@@ -1,0 +1,15 @@
+{
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "{{node.version}}"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint"
+      ]
+    }
+  }
+}
+

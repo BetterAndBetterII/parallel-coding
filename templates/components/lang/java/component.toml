@@ -1,0 +1,11 @@
+id = "lang/java"
+name = "Java (OpenJDK)"
+description = "OpenJDK via apt (default: 21)"
+category = "Language"
+
+[[params]]
+key = "java.package"
+prompt = "Java package (apt)"
+default = "openjdk-21-jdk"
+choices = ["openjdk-17-jdk", "openjdk-21-jdk"]
+

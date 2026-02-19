@@ -1,0 +1,11 @@
+id = "lang/rust"
+name = "Rust"
+description = "Rust toolchain via devcontainers feature"
+category = "Language"
+
+[[params]]
+key = "rust.version"
+prompt = "Rust version"
+default = "stable"
+choices = ["stable", "nightly"]
+

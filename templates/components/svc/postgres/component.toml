@@ -1,0 +1,5 @@
+id = "svc/postgres"
+name = "PostgreSQL"
+description = "PostgreSQL service (compose) + forward port 5432"
+category = "Service"
+

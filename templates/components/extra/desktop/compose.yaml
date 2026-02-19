@@ -1,0 +1,20 @@
+services:
+  desktop:
+    image: lscr.io/linuxserver/webtop:ubuntu-kde
+    profiles: ["desktop"]
+    shm_size: "1gb"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: ${TZ:-Etc/UTC}
+      USERNAME: ${WEBTOP_USERNAME:-vscode}
+      PASSWORD: ${WEBTOP_PASSWORD:-}
+    volumes:
+      - desktop_home:/config
+    ports:
+      - "127.0.0.1::3000"
+    restart: unless-stopped
+
+volumes:
+  desktop_home: {}
+

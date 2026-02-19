@@ -24,12 +24,19 @@ fn templates_compose_writes_only_selected_stacks() {
     let base = td.path().join("templates").join("py");
     let devcontainer = fs::read_to_string(base.join("devcontainer.json")).unwrap();
     let compose = fs::read_to_string(base.join("compose.yaml")).unwrap();
+    let uv_script = fs::read_to_string(
+        base.join("scripts")
+            .join("post-create.d")
+            .join("20-python-uv.sh"),
+    )
+    .unwrap();
 
     assert!(devcontainer.contains("features"));
     assert!(devcontainer.contains("devcontainers/features/python"));
     assert!(!devcontainer.contains("devcontainers/features/go"));
     assert!(!devcontainer.contains("devcontainers/features/node"));
-    assert!(devcontainer.contains("pip install --user uv"));
+    assert!(devcontainer.contains("pc-post-create"));
+    assert!(uv_script.contains("pip install --user uv"));
 
     assert!(compose.contains("uv_cache"));
     assert!(compose.contains("pip_cache"));

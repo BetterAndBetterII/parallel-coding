@@ -1,0 +1,11 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/workspaces/workspace:cached
+    command: sleep infinity
+
+volumes: {}
+

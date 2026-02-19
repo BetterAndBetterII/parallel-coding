@@ -1,0 +1,11 @@
+services:
+  dev:
+    volumes:
+      - npm_cache:/home/vscode/.npm
+    environment:
+      NPM_CONFIG_CACHE: /home/vscode/.npm
+
+volumes:
+  npm_cache:
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-npm-cache
+

@@ -1,11 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
-use serde_json::json;
-
-const EMBEDDED_PRESETS: &[&str] = &["python-uv"];
+use include_dir::{include_dir, Dir};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub struct ForceRequired {
@@ -20,6 +19,8 @@ impl fmt::Display for ForceRequired {
 
 impl std::error::Error for ForceRequired {}
 
+static EMBEDDED_TEMPLATES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/templates");
+
 fn pc_home_dir() -> Option<PathBuf> {
     if let Some(v) = std::env::var_os("PC_HOME") {
         return Some(PathBuf::from(v));
@@ -28,261 +29,697 @@ fn pc_home_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".pc"))
 }
 
-fn preset_dir(preset: &str) -> Option<PathBuf> {
-    Some(pc_home_dir()?.join("templates").join(preset))
+fn templates_root_dir() -> Option<PathBuf> {
+    Some(pc_home_dir()?.join("templates"))
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct StackSpec {
-    pub python: bool,
-    pub uv: bool,
-    pub go: bool,
-    pub node: bool,
-    pub pnpm: bool,
-    pub desktop: bool,
+fn user_templates_dir(preset: &str) -> Option<PathBuf> {
+    Some(templates_root_dir()?.join(preset))
 }
 
-impl StackSpec {
-    pub fn normalize(&mut self) {
-        if self.uv {
-            self.python = true;
-        }
-        if self.pnpm {
-            self.node = true;
-        }
-    }
+fn user_components_root_dir() -> Option<PathBuf> {
+    Some(templates_root_dir()?.join(".components"))
 }
 
-pub fn write_composed_preset(name: &str, mut spec: StackSpec, force: bool) -> Result<PathBuf> {
-    spec.normalize();
-
-    let pc_home = pc_home_dir().ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
-    let dir = pc_home.join("templates").join(name);
-    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-
-    let files = composed_files(&spec)?;
-    for (filename, contents) in files {
-        let target = dir.join(&filename);
-        if target.exists() && !force {
-            return Err(ForceRequired { target }.into());
-        }
-        std::fs::write(&target, contents)
-            .with_context(|| format!("Failed to write {}", target.display()))?;
-    }
-    Ok(dir)
+fn user_profiles_root_dir() -> Option<PathBuf> {
+    Some(templates_root_dir()?.join(".profiles"))
 }
 
-fn composed_files(spec: &StackSpec) -> Result<Vec<(String, String)>> {
-    let devcontainer = composed_devcontainer_json(spec)?;
-    let compose = composed_compose_yaml(spec);
-    let dockerfile = composed_dockerfile();
-    Ok(vec![
-        ("devcontainer.json".to_string(), devcontainer),
-        ("compose.yaml".to_string(), compose),
-        ("Dockerfile".to_string(), dockerfile),
-    ])
+#[derive(Debug, Clone)]
+pub struct TemplateFile {
+    pub rel_path: PathBuf,
+    pub bytes: Vec<u8>,
 }
 
-fn composed_dockerfile() -> String {
-    "FROM mcr.microsoft.com/devcontainers/base:bookworm\n".to_string()
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComposeSpec {
+    pub components: Vec<String>,
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
 }
 
-fn composed_devcontainer_json(spec: &StackSpec) -> Result<String> {
-    let mut features = serde_json::Map::new();
-    if spec.python {
-        features.insert(
-            "ghcr.io/devcontainers/features/python:1".to_string(),
-            json!({ "version": "3.13" }),
-        );
-    }
-    if spec.node {
-        features.insert(
-            "ghcr.io/devcontainers/features/node:1".to_string(),
-            json!({ "version": "22" }),
-        );
-    }
-    if spec.go {
-        features.insert(
-            "ghcr.io/devcontainers/features/go:1".to_string(),
-            json!({ "version": "1.22" }),
-        );
-    }
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComponentParam {
+    pub key: String,
+    pub prompt: String,
+    pub default: String,
+    #[serde(default)]
+    pub choices: Vec<String>,
+}
 
-    let mut post_create_steps: Vec<&str> = Vec::new();
-    if spec.uv {
-        post_create_steps.push("command -v uv >/dev/null 2>&1 || python -m pip install --user uv");
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComponentManifest {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub depends: Vec<String>,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    #[serde(default)]
+    pub params: Vec<ComponentParam>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileManifest {
+    #[serde(default)]
+    pub components: Vec<String>,
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
+pub fn embedded_component_manifests() -> Result<Vec<ComponentManifest>> {
+    let mut out = Vec::new();
+    let dir = EMBEDDED_TEMPLATES_DIR
+        .get_dir("components")
+        .ok_or_else(|| anyhow!("Embedded templates missing templates/components/"))?;
+    for (id, bytes) in embedded_find_component_tomls(dir, "components") {
+        let s = std::str::from_utf8(&bytes)
+            .with_context(|| format!("Embedded component.toml not UTF-8 for {id}"))?;
+        let m: ComponentManifest = toml::from_str(s)
+            .with_context(|| format!("Failed to parse component.toml for {id}"))?;
+        out.push(m);
     }
-    if spec.pnpm {
-        post_create_steps.push("corepack enable >/dev/null 2>&1 || true");
-    }
-    let post_create = if post_create_steps.is_empty() {
-        None
-    } else {
-        Some(format!("bash -lc '{}'", post_create_steps.join(" && ")))
+    Ok(out)
+}
+
+pub fn embedded_profile_names() -> Vec<String> {
+    let Some(dir) = EMBEDDED_TEMPLATES_DIR.get_dir("profiles") else {
+        return Vec::new();
     };
+    let mut out = Vec::new();
+    for d in dir.dirs() {
+        let Some(name) = d.path().file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Note: include_dir's lookups are relative to the included root.
+        if d.get_file(d.path().join("profile.toml")).is_some() {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
+}
 
-    let mut extensions: Vec<&str> = vec!["ms-azuretools.vscode-docker"];
-    if spec.python {
-        extensions.push("ms-python.python");
-        extensions.push("ms-python.vscode-pylance");
-    }
-    if spec.go {
-        extensions.push("golang.go");
+pub fn component_manifests() -> Result<Vec<ComponentManifest>> {
+    let mut merged: BTreeMap<String, ComponentManifest> = BTreeMap::new();
+    for m in embedded_component_manifests()? {
+        merged.insert(m.id.clone(), m);
     }
 
-    let mut root = serde_json::Map::new();
-    root.insert("name".to_string(), json!("workspace"));
-    root.insert("dockerComposeFile".to_string(), json!("compose.yaml"));
-    root.insert("service".to_string(), json!("dev"));
-    root.insert(
-        "workspaceFolder".to_string(),
-        json!("/workspaces/workspace"),
-    );
-    root.insert("remoteUser".to_string(), json!("vscode"));
-    root.insert("updateRemoteUserUID".to_string(), json!(true));
-    if !features.is_empty() {
-        root.insert("features".to_string(), serde_json::Value::Object(features));
-    }
-    if let Some(cmd) = post_create {
-        root.insert("postCreateCommand".to_string(), json!(cmd));
-    }
-    root.insert(
-        "customizations".to_string(),
-        json!({
-            "vscode": {
-                "extensions": extensions,
+    if let Some(root) = user_components_root_dir() {
+        if root.is_dir() {
+            for path in find_component_tomls_on_fs(&root)? {
+                let s = std::fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read {}", path.display()))?;
+                let m: ComponentManifest = toml::from_str(&s)
+                    .with_context(|| format!("Failed to parse {}", path.display()))?;
+                merged.insert(m.id.clone(), m);
             }
-        }),
-    );
+        }
+    }
 
-    let v = serde_json::Value::Object(root);
-    Ok(serde_json::to_string_pretty(&v)? + "\n")
+    Ok(merged.into_values().collect())
 }
 
-fn composed_compose_yaml(spec: &StackSpec) -> String {
-    let mut volumes = Vec::new();
-    let mut volume_defs = Vec::new();
-
-    if spec.python {
-        volumes.push("      - uv_cache:/home/vscode/.cache/uv".to_string());
-        volumes.push("      - pip_cache:/home/vscode/.cache/pip".to_string());
-        volume_defs.push("  uv_cache:".to_string());
-        volume_defs.push("    external: true".to_string());
-        volume_defs
-            .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-uv-cache".to_string());
-        volume_defs.push("  pip_cache:".to_string());
-        volume_defs.push("    external: true".to_string());
-        volume_defs
-            .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pip-cache".to_string());
-    }
-
-    if spec.node {
-        volumes.push("      - pnpm_home:/home/vscode/.local/share/pnpm".to_string());
-        volumes.push("      - npm_cache:/home/vscode/.npm".to_string());
-        volume_defs.push("  pnpm_home:".to_string());
-        volume_defs.push("    external: true".to_string());
-        volume_defs
-            .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pnpm-home".to_string());
-        volume_defs.push("  npm_cache:".to_string());
-        volume_defs.push("    external: true".to_string());
-        volume_defs
-            .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-npm-cache".to_string());
-    }
-
-    if spec.go {
-        volumes.push("      - go_mod_cache:/home/vscode/go/pkg/mod".to_string());
-        volumes.push("      - go_build_cache:/home/vscode/.cache/go-build".to_string());
-        volume_defs.push("  go_mod_cache:".to_string());
-        volume_defs.push("    external: true".to_string());
-        volume_defs
-            .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-mod-cache".to_string());
-        volume_defs.push("  go_build_cache:".to_string());
-        volume_defs.push("    external: true".to_string());
-        volume_defs.push(
-            "    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-build-cache".to_string(),
-        );
-    }
-
-    let mut envs = Vec::new();
-    if spec.python {
-        envs.push("      UV_CACHE_DIR: /home/vscode/.cache/uv".to_string());
-        envs.push("      PIP_CACHE_DIR: /home/vscode/.cache/pip".to_string());
-        envs.push("      PYTHONDONTWRITEBYTECODE: \"1\"".to_string());
-        envs.push("      PYTHONUNBUFFERED: \"1\"".to_string());
-    }
-    if spec.node {
-        envs.push("      NPM_CONFIG_CACHE: /home/vscode/.npm".to_string());
-        envs.push("      PNPM_HOME: /home/vscode/.local/share/pnpm".to_string());
-        envs.push("      PATH: /home/vscode/.local/share/pnpm:${PATH}".to_string());
-    }
-    if spec.go {
-        envs.push("      GOMODCACHE: /home/vscode/go/pkg/mod".to_string());
-        envs.push("      GOCACHE: /home/vscode/.cache/go-build".to_string());
-    }
-
-    let desktop_service = if spec.desktop {
-        r#"
-
-  desktop:
-    image: lscr.io/linuxserver/webtop:ubuntu-kde
-    profiles: ["desktop"]
-    shm_size: "1gb"
-    environment:
-      PUID: "1000"
-      PGID: "1000"
-      TZ: ${TZ:-Etc/UTC}
-      USERNAME: ${WEBTOP_USERNAME:-vscode}
-      PASSWORD: ${WEBTOP_PASSWORD:-}
-    volumes:
-      - desktop_home:/config
-    ports:
-      - "127.0.0.1::3000"
-    restart: unless-stopped
-"#
-        .to_string()
-    } else {
-        "".to_string()
-    };
-
-    let mut out = String::new();
-    out.push_str("services:\n");
-    out.push_str("  dev:\n");
-    out.push_str("    build:\n");
-    out.push_str("      context: .\n");
-    out.push_str("      dockerfile: Dockerfile\n");
-    out.push_str("    volumes:\n");
-    out.push_str("      - ..:/workspaces/workspace:cached\n");
-    for v in volumes {
-        out.push_str(&v);
-        out.push('\n');
-    }
-    if !envs.is_empty() {
-        out.push_str("    environment:\n");
-        for e in envs {
-            out.push_str(&e);
-            out.push('\n');
+fn find_component_tomls_on_fs(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for p in walk_dir_files(root)? {
+        if p.file_name().and_then(|s| s.to_str()) == Some("component.toml") {
+            out.push(p);
         }
     }
-    out.push_str("    command: sleep infinity\n");
-    out.push_str(&desktop_service);
-    if spec.desktop || !volume_defs.is_empty() {
-        out.push_str("\nvolumes:\n");
-        if spec.desktop {
-            out.push_str("  desktop_home: {}\n");
+    Ok(out)
+}
+
+pub fn component_param_defs(components: &[String]) -> Result<Vec<ComponentParam>> {
+    let resolved = resolve_components(components)?;
+    let mut defs: BTreeMap<String, ComponentParam> = BTreeMap::new();
+    for id in resolved {
+        let c = load_component(&id)?;
+        for p in c.manifest.params {
+            defs.entry(p.key.clone()).or_insert(p);
         }
-        for line in volume_defs {
-            out.push_str(&line);
-            out.push('\n');
+    }
+    Ok(defs.into_values().collect())
+}
+
+fn embedded_find_component_tomls(dir: &include_dir::Dir<'_>, base: &str) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for f in dir.files() {
+        if f.path().file_name().and_then(|s| s.to_str()) == Some("component.toml") {
+            let rel = f.path().to_string_lossy().to_string();
+            let id = rel
+                .strip_prefix(&format!("{base}/"))
+                .unwrap_or(&rel)
+                .trim_end_matches("/component.toml")
+                .to_string();
+            out.push((id, f.contents().to_vec()));
         }
-    } else {
-        out.push_str("\nvolumes: {}\n");
+    }
+    for d in dir.dirs() {
+        out.extend(embedded_find_component_tomls(d, base));
     }
     out
 }
 
-fn read_preset_file(dir: &Path, filename: &str) -> Result<String> {
-    let path = dir.join(filename);
-    std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))
+pub fn write_composed_template(name: &str, spec: ComposeSpec, force: bool) -> Result<PathBuf> {
+    validate_template_name(name)?;
+
+    let root =
+        templates_root_dir().ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("Failed to create {}", root.display()))?;
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+
+    let files = render_from_components(&spec.components, &spec.params)?;
+    write_template_dir(&dir, &files, force)?;
+    Ok(dir)
+}
+
+fn write_template_dir(dir: &Path, files: &[TemplateFile], force: bool) -> Result<()> {
+    for f in files {
+        let target = dir.join(&f.rel_path);
+        if target.exists() && !force {
+            return Err(ForceRequired {
+                target: target.clone(),
+            }
+            .into());
+        }
+    }
+    for f in files {
+        let target = dir.join(&f.rel_path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&target, &f.bytes)
+            .with_context(|| format!("Failed to write {}", target.display()))?;
+    }
+    Ok(())
+}
+
+fn validate_template_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("template name cannot be empty");
+    }
+    if name == ".components" || name == ".profiles" || name == "runtime" {
+        bail!("template name {name} is reserved");
+    }
+    if name.contains('/') || name.contains('\\') {
+        bail!("template name must not contain path separators");
+    }
+    Ok(())
+}
+
+pub fn render_from_components(
+    components: &[String],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<TemplateFile>> {
+    let mut resolved = resolve_components(components)?;
+    ensure_base_component(&mut resolved);
+
+    let mut effective_params = params.clone();
+    for id in &resolved {
+        let c = load_component(id)?;
+        for p in c.manifest.params {
+            effective_params.entry(p.key).or_insert(p.default);
+        }
+    }
+
+    let mut all_files: Vec<TemplateFile> = Vec::new();
+    let mut docker_parts: Vec<(String, String)> = Vec::new();
+    let mut devcontainer_fragments: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut compose_fragments: Vec<(String, serde_yaml::Value)> = Vec::new();
+
+    for id in &resolved {
+        let c = load_component(id)?;
+
+        if let Some(s) = c.devcontainer_json {
+            let s = apply_params_str(&s, &effective_params);
+            let v: serde_json::Value = serde_json::from_str(&s)
+                .with_context(|| format!("Failed to parse devcontainer.json fragment for {id}"))?;
+            devcontainer_fragments.push((id.clone(), v));
+        }
+        if let Some(s) = c.compose_yaml {
+            let s = apply_params_str(&s, &effective_params);
+            let v: serde_yaml::Value = serde_yaml::from_str(&s)
+                .with_context(|| format!("Failed to parse compose.yaml fragment for {id}"))?;
+            compose_fragments.push((id.clone(), v));
+        }
+        if let Some(s) = c.dockerfile_part {
+            let s = apply_params_str(&s, &effective_params);
+            docker_parts.push((id.clone(), s));
+        }
+        for mut f in c.extra_files {
+            if let Ok(s) = std::str::from_utf8(&f.bytes) {
+                f.bytes = apply_params_str(s, &effective_params).into_bytes();
+            }
+            all_files.push(f);
+        }
+    }
+
+    let devcontainer = merge_json_fragments(&devcontainer_fragments)?;
+    let compose = merge_yaml_fragments(&compose_fragments)?;
+    let dockerfile = render_dockerfile(&docker_parts)?;
+
+    all_files.push(TemplateFile {
+        rel_path: PathBuf::from("devcontainer.json"),
+        bytes: (serde_json::to_string_pretty(&devcontainer)? + "\n").into_bytes(),
+    });
+    all_files.push(TemplateFile {
+        rel_path: PathBuf::from("compose.yaml"),
+        bytes: (serde_yaml::to_string(&compose)?).into_bytes(),
+    });
+    all_files.push(TemplateFile {
+        rel_path: PathBuf::from("Dockerfile"),
+        bytes: dockerfile.into_bytes(),
+    });
+
+    Ok(stable_dedup_files(all_files))
+}
+
+fn ensure_base_component(components: &mut Vec<String>) {
+    if components.iter().any(|c| c == "base/devcontainer") {
+        return;
+    }
+    components.insert(0, "base/devcontainer".to_string());
+}
+
+fn stable_dedup_files(files: Vec<TemplateFile>) -> Vec<TemplateFile> {
+    let mut seen = BTreeSet::<String>::new();
+    let mut out = Vec::new();
+    for f in files {
+        let k = f.rel_path.to_string_lossy().to_string();
+        if seen.insert(k) {
+            out.push(f);
+        }
+    }
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    out
+}
+
+fn apply_params_str(s: &str, params: &BTreeMap<String, String>) -> String {
+    let mut out = s.to_string();
+    for (k, v) in params {
+        out = out.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    out
+}
+
+fn merge_json_fragments(frags: &[(String, serde_json::Value)]) -> Result<serde_json::Value> {
+    let mut root = serde_json::Value::Object(serde_json::Map::new());
+    for (id, v) in frags {
+        merge_json_value(&mut root, v, id, "$")?;
+    }
+    Ok(root)
+}
+
+fn merge_json_value(
+    dst: &mut serde_json::Value,
+    src: &serde_json::Value,
+    src_id: &str,
+    path: &str,
+) -> Result<()> {
+    match (dst, src) {
+        (serde_json::Value::Object(d), serde_json::Value::Object(s)) => {
+            for (k, sv) in s {
+                let sub_path = format!("{path}.{k}");
+                match d.get_mut(k) {
+                    None => {
+                        d.insert(k.clone(), sv.clone());
+                    }
+                    Some(dv) => {
+                        if dv == sv {
+                            continue;
+                        }
+                        if dv.is_object() && sv.is_object() {
+                            merge_json_value(dv, sv, src_id, &sub_path)?;
+                        } else if dv.is_array() && sv.is_array() {
+                            merge_json_value(dv, sv, src_id, &sub_path)?;
+                        } else {
+                            bail!("Conflict at {sub_path} while merging component {src_id}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        (serde_json::Value::Array(d), serde_json::Value::Array(s)) => {
+            for item in s {
+                d.push(item.clone());
+            }
+            // Best-effort de-dup scalar arrays.
+            let all_scalar = d.iter().all(|v| matches!(v, serde_json::Value::String(_)))
+                || d.iter().all(|v| matches!(v, serde_json::Value::Number(_)))
+                || d.iter().all(|v| matches!(v, serde_json::Value::Bool(_)));
+            if all_scalar {
+                let mut seen = BTreeSet::new();
+                d.retain(|v| seen.insert(v.to_string()));
+            }
+            Ok(())
+        }
+        (d, s) => {
+            if d == s {
+                Ok(())
+            } else {
+                bail!("Type conflict at {path} while merging component {src_id}");
+            }
+        }
+    }
+}
+
+fn merge_yaml_fragments(frags: &[(String, serde_yaml::Value)]) -> Result<serde_yaml::Value> {
+    let mut root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    for (id, v) in frags {
+        merge_yaml_value(&mut root, v, id, "$")?;
+    }
+    Ok(root)
+}
+
+fn merge_yaml_value(
+    dst: &mut serde_yaml::Value,
+    src: &serde_yaml::Value,
+    src_id: &str,
+    path: &str,
+) -> Result<()> {
+    match (dst, src) {
+        (serde_yaml::Value::Mapping(d), serde_yaml::Value::Mapping(s)) => {
+            for (k, sv) in s {
+                let key_str = match k {
+                    serde_yaml::Value::String(x) => x.clone(),
+                    _ => format!("{k:?}"),
+                };
+                let sub_path = format!("{path}.{key_str}");
+                match d.get_mut(k) {
+                    None => {
+                        d.insert(k.clone(), sv.clone());
+                    }
+                    Some(dv) => {
+                        if dv == sv {
+                            continue;
+                        }
+                        if dv.is_mapping() && sv.is_mapping() {
+                            merge_yaml_value(dv, sv, src_id, &sub_path)?;
+                        } else if dv.is_sequence() && sv.is_sequence() {
+                            merge_yaml_value(dv, sv, src_id, &sub_path)?;
+                        } else {
+                            bail!("Conflict at {sub_path} while merging component {src_id}");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        (serde_yaml::Value::Sequence(d), serde_yaml::Value::Sequence(s)) => {
+            for item in s {
+                d.push(item.clone());
+            }
+            let all_str = d.iter().all(|v| matches!(v, serde_yaml::Value::String(_)));
+            if all_str {
+                let mut seen = BTreeSet::new();
+                d.retain(|v| seen.insert(format!("{v:?}")));
+            }
+            Ok(())
+        }
+        (d, s) => {
+            if d == s {
+                Ok(())
+            } else {
+                bail!("Type conflict at {path} while merging component {src_id}");
+            }
+        }
+    }
+}
+
+fn render_dockerfile(parts: &[(String, String)]) -> Result<String> {
+    if parts.is_empty() {
+        return Ok("FROM mcr.microsoft.com/devcontainers/base:bookworm\n".to_string());
+    }
+
+    let mut out = String::new();
+    for (id, part) in parts {
+        out.push_str(&format!("# pc:component {id} begin\n"));
+        out.push_str(part);
+        if !part.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("# pc:component {id} end\n\n"));
+    }
+    Ok(out)
+}
+
+#[derive(Debug)]
+struct LoadedComponent {
+    manifest: ComponentManifest,
+    devcontainer_json: Option<String>,
+    compose_yaml: Option<String>,
+    dockerfile_part: Option<String>,
+    extra_files: Vec<TemplateFile>,
+}
+
+fn load_component(id: &str) -> Result<LoadedComponent> {
+    if id.is_empty() {
+        bail!("component id cannot be empty");
+    }
+    if id.contains("..") {
+        bail!("invalid component id: {id}");
+    }
+
+    if let Some(root) = user_components_root_dir() {
+        let p = root.join(id);
+        if p.is_dir() {
+            return load_component_from_fs(&p);
+        }
+    }
+
+    let p = format!("components/{id}");
+    let dir = EMBEDDED_TEMPLATES_DIR
+        .get_dir(&p)
+        .ok_or_else(|| anyhow!("Unknown component: {id}"))?;
+    load_component_from_embedded(dir)
+}
+
+fn load_component_from_fs(dir: &Path) -> Result<LoadedComponent> {
+    let manifest_path = dir.join("component.toml");
+    let manifest_s = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest: ComponentManifest = toml::from_str(&manifest_s)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+
+    let devcontainer_json = read_opt_text(dir.join("devcontainer.json"))?;
+    let compose_yaml = read_opt_text(dir.join("compose.yaml"))?;
+    let dockerfile_part = read_opt_text(dir.join("Dockerfile.part"))?;
+    let extra_files = read_opt_files_tree(&dir.join("files"))?;
+
+    Ok(LoadedComponent {
+        manifest,
+        devcontainer_json,
+        compose_yaml,
+        dockerfile_part,
+        extra_files,
+    })
+}
+
+fn read_opt_text(path: PathBuf) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read_to_string(&path).with_context(|| {
+        format!("Failed to read {}", path.display())
+    })?))
+}
+
+fn read_opt_files_tree(root: &Path) -> Result<Vec<TemplateFile>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in walk_dir_files(root)? {
+        let bytes =
+            std::fs::read(&entry).with_context(|| format!("Failed to read {}", entry.display()))?;
+        let rel = entry
+            .strip_prefix(root)
+            .with_context(|| format!("Failed to strip prefix {}", root.display()))?;
+        out.push(TemplateFile {
+            rel_path: rel.to_path_buf(),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+fn walk_dir_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return Ok(out);
+    }
+    for entry in
+        std::fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("Failed to read entry under {}", root.display()))?;
+        let path = entry.path();
+        let meta = entry
+            .metadata()
+            .with_context(|| format!("Failed to stat {}", path.display()))?;
+        if meta.is_dir() {
+            out.extend(walk_dir_files(&path)?);
+        } else if meta.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
+fn load_component_from_embedded(dir: &include_dir::Dir<'_>) -> Result<LoadedComponent> {
+    let manifest_f = dir
+        .get_file(dir.path().join("component.toml"))
+        .ok_or_else(|| {
+            anyhow!(
+                "Embedded component missing component.toml: {}",
+                dir.path().display()
+            )
+        })?;
+    let manifest_s =
+        std::str::from_utf8(manifest_f.contents()).context("Embedded component.toml not UTF-8")?;
+    let manifest: ComponentManifest =
+        toml::from_str(manifest_s).context("Failed to parse embedded component.toml")?;
+
+    let devcontainer_json = dir
+        .get_file(dir.path().join("devcontainer.json"))
+        .map(|f| {
+            std::str::from_utf8(f.contents())
+                .context("Embedded devcontainer.json not UTF-8")
+                .map(|s| s.to_string())
+        })
+        .transpose()?;
+    let compose_yaml = dir
+        .get_file(dir.path().join("compose.yaml"))
+        .map(|f| {
+            std::str::from_utf8(f.contents())
+                .context("Embedded compose.yaml not UTF-8")
+                .map(|s| s.to_string())
+        })
+        .transpose()?;
+    let dockerfile_part = dir
+        .get_file(dir.path().join("Dockerfile.part"))
+        .map(|f| {
+            std::str::from_utf8(f.contents())
+                .context("Embedded Dockerfile.part not UTF-8")
+                .map(|s| s.to_string())
+        })
+        .transpose()?;
+
+    let mut extra_files = Vec::new();
+    if let Some(files_dir) = dir.get_dir(dir.path().join("files")) {
+        extra_files.extend(read_embedded_files_tree(files_dir, Path::new(""))?);
+    }
+
+    Ok(LoadedComponent {
+        manifest,
+        devcontainer_json,
+        compose_yaml,
+        dockerfile_part,
+        extra_files,
+    })
+}
+
+fn read_embedded_files_tree(dir: &include_dir::Dir<'_>, rel: &Path) -> Result<Vec<TemplateFile>> {
+    let mut out = Vec::new();
+    for f in dir.files() {
+        let name = f
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("Invalid embedded filename under {}", dir.path().display()))?;
+        let p = rel.join(name);
+        out.push(TemplateFile {
+            rel_path: p,
+            bytes: f.contents().to_vec(),
+        });
+    }
+    for d in dir.dirs() {
+        let name = d
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("Invalid embedded dirname under {}", dir.path().display()))?;
+        out.extend(read_embedded_files_tree(d, &rel.join(name))?);
+    }
+    Ok(out)
+}
+
+fn resolve_components(requested: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+
+    let mut initial = Vec::new();
+    for c in requested {
+        let mapped = map_legacy_component_name(c);
+        initial.push(mapped.to_string());
+    }
+
+    for id in initial {
+        dfs_component(&id, &mut out, &mut visiting, &mut visited)?;
+    }
+    check_conflicts(&out)?;
+    Ok(out)
+}
+
+fn dfs_component(
+    id: &str,
+    out: &mut Vec<String>,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
+) -> Result<()> {
+    if visited.contains(id) {
+        return Ok(());
+    }
+    if !visiting.insert(id.to_string()) {
+        bail!("Dependency cycle detected at component {id}");
+    }
+    let c = load_component(id)?;
+    for dep in &c.manifest.depends {
+        dfs_component(dep, out, visiting, visited)?;
+    }
+    visiting.remove(id);
+    visited.insert(id.to_string());
+    out.push(id.to_string());
+    Ok(())
+}
+
+fn check_conflicts(resolved: &[String]) -> Result<()> {
+    let mut present = BTreeSet::new();
+    for id in resolved {
+        present.insert(id.clone());
+    }
+    for id in resolved {
+        let c = load_component(id)?;
+        for conflict in &c.manifest.conflicts {
+            if present.contains(conflict) {
+                bail!("Component conflict: {id} conflicts with {conflict}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn map_legacy_component_name(s: &str) -> &str {
+    match s {
+        "python" => "lang/python",
+        "uv" => "tool/python/uv",
+        "go" => "lang/go",
+        "node" => "lang/node",
+        "pnpm" => "tool/node/pnpm",
+        "desktop" => "extra/desktop",
+        other => other,
+    }
 }
 
 fn sanitize_image_tag(raw: &str) -> String {
@@ -368,75 +805,160 @@ fn make_compose_stealth(compose: &str, default_image: &str) -> Result<String> {
     Ok(out.join("\n") + "\n")
 }
 
-pub fn preset_files(preset: &str) -> Result<Vec<(String, String)>> {
-    if let Some(dir) = preset_dir(preset) {
+pub fn preset_files(preset: &str) -> Result<Vec<TemplateFile>> {
+    if let Some(dir) = user_templates_dir(preset) {
         if dir.is_dir() {
-            let dc = read_preset_file(&dir, "devcontainer.json")?;
-            let compose = read_preset_file(&dir, "compose.yaml")?;
-            let dockerfile = read_preset_file(&dir, "Dockerfile")?;
-            return Ok(vec![
-                ("devcontainer.json".to_string(), dc),
-                ("compose.yaml".to_string(), compose),
-                ("Dockerfile".to_string(), dockerfile),
-            ]);
+            return read_fs_template_dir(&dir);
         }
     }
 
-    match preset {
-        "python-uv" => Ok(vec![
-            (
-                "devcontainer.json".to_string(),
-                include_str!("../templates/python-uv/devcontainer.json").to_string(),
-            ),
-            (
-                "compose.yaml".to_string(),
-                include_str!("../templates/python-uv/compose.yaml").to_string(),
-            ),
-            (
-                "Dockerfile".to_string(),
-                include_str!("../templates/python-uv/Dockerfile").to_string(),
-            ),
-        ]),
-        other => bail!("Unknown preset: {other}"),
+    if let Some(root) = user_profiles_root_dir() {
+        let p = root.join(preset).join("profile.toml");
+        if p.exists() {
+            let profile = read_profile_from_fs(&p)?;
+            return render_from_components(&profile.components, &profile.params);
+        }
     }
+
+    if let Some(dir) = EMBEDDED_TEMPLATES_DIR.get_dir(preset) {
+        if dir.get_file("devcontainer.json").is_some() {
+            return read_embedded_template_dir(dir);
+        }
+    }
+
+    if let Some(profile) = read_profile_from_embedded(preset)? {
+        return render_from_components(&profile.components, &profile.params);
+    }
+
+    bail!("Unknown preset/profile: {preset}")
 }
 
-pub fn embedded_presets() -> &'static [&'static str] {
-    EMBEDDED_PRESETS
+fn read_fs_template_dir(dir: &Path) -> Result<Vec<TemplateFile>> {
+    let mut out = Vec::new();
+    for f in walk_dir_files(dir)? {
+        let rel = f
+            .strip_prefix(dir)
+            .with_context(|| format!("Failed to strip prefix {}", dir.display()))?
+            .to_path_buf();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let bytes = std::fs::read(&f).with_context(|| format!("Failed to read {}", f.display()))?;
+        out.push(TemplateFile {
+            rel_path: rel,
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
+fn read_embedded_template_dir(dir: &include_dir::Dir<'_>) -> Result<Vec<TemplateFile>> {
+    let mut out = Vec::new();
+    for f in dir.files() {
+        let name = f
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("Invalid embedded filename under {}", dir.path().display()))?;
+        out.push(TemplateFile {
+            rel_path: PathBuf::from(name),
+            bytes: f.contents().to_vec(),
+        });
+    }
+    for d in dir.dirs() {
+        let name = d
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("Invalid embedded dirname under {}", dir.path().display()))?;
+        for f in read_embedded_template_dir(d)? {
+            out.push(TemplateFile {
+                rel_path: PathBuf::from(name).join(f.rel_path),
+                bytes: f.bytes,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn read_profile_from_fs(path: &Path) -> Result<ProfileManifest> {
+    let s = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    toml::from_str(&s).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+fn read_profile_from_embedded(name: &str) -> Result<Option<ProfileManifest>> {
+    let p = format!("profiles/{name}/profile.toml");
+    let Some(f) = EMBEDDED_TEMPLATES_DIR.get_file(&p) else {
+        return Ok(None);
+    };
+    let s = std::str::from_utf8(f.contents()).with_context(|| format!("Embedded {p} not UTF-8"))?;
+    let m: ProfileManifest =
+        toml::from_str(s).with_context(|| format!("Failed to parse embedded {p}"))?;
+    Ok(Some(m))
+}
+
+pub fn embedded_presets() -> Vec<String> {
+    let mut out = Vec::new();
+    for d in EMBEDDED_TEMPLATES_DIR.dirs() {
+        let Some(name) = d.path().file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name == "components" || name == "profiles" {
+            continue;
+        }
+        if d.get_file("devcontainer.json").is_some() {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
 }
 
 pub fn install_embedded_preset(preset: &str, force: bool) -> Result<PathBuf> {
-    let pc_home = pc_home_dir().ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
-    let dir = pc_home.join("templates").join(preset);
+    let root =
+        templates_root_dir().ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
+    let dir = root.join(preset);
     std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
-    let files = match preset {
-        "python-uv" => vec![
-            (
-                "devcontainer.json",
-                include_str!("../templates/python-uv/devcontainer.json"),
-            ),
-            (
-                "compose.yaml",
-                include_str!("../templates/python-uv/compose.yaml"),
-            ),
-            (
-                "Dockerfile",
-                include_str!("../templates/python-uv/Dockerfile"),
-            ),
-        ],
-        other => bail!("Unknown preset: {other}"),
-    };
-
-    for (name, contents) in files {
-        let target = dir.join(name);
-        if target.exists() && !force {
-            return Err(ForceRequired { target }.into());
-        }
-        std::fs::write(&target, contents)
-            .with_context(|| format!("Failed to write {}", target.display()))?;
+    if let Some(embedded) = EMBEDDED_TEMPLATES_DIR.get_dir(preset) {
+        let files = read_embedded_template_dir(embedded)?;
+        write_template_dir(&dir, &files, force)?;
+        return Ok(dir);
     }
 
+    if let Some(profile) = read_profile_from_embedded(preset)? {
+        let files = render_from_components(&profile.components, &profile.params)?;
+        write_template_dir(&dir, &files, force)?;
+        return Ok(dir);
+    }
+
+    bail!("Unknown embedded preset/profile: {preset}")
+}
+
+pub fn install_embedded_components(force: bool) -> Result<PathBuf> {
+    let root =
+        templates_root_dir().ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
+    let dir = root.join(".components");
+    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    let Some(src) = EMBEDDED_TEMPLATES_DIR.get_dir("components") else {
+        bail!("Embedded templates missing templates/components/");
+    };
+    let files = read_embedded_template_dir(src)?;
+    write_template_dir(&dir, &files, force)?;
+    Ok(dir)
+}
+
+pub fn install_embedded_profiles(force: bool) -> Result<PathBuf> {
+    let root =
+        templates_root_dir().ok_or_else(|| anyhow!("HOME is not set; cannot use $HOME/.pc"))?;
+    let dir = root.join(".profiles");
+    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    let Some(src) = EMBEDDED_TEMPLATES_DIR.get_dir("profiles") else {
+        bail!("Embedded templates missing templates/profiles/");
+    };
+    let files = read_embedded_template_dir(src)?;
+    write_template_dir(&dir, &files, force)?;
     Ok(dir)
 }
 
@@ -451,19 +973,22 @@ pub fn ensure_runtime_preset_stealth(preset: &str, force: bool) -> Result<PathBu
         .with_context(|| format!("Failed to create {}", dc_dir.display()))?;
 
     let files = preset_files(preset)?;
-    for (name, contents) in files {
-        let target = dc_dir.join(&name);
+    for f in files {
+        let target = dc_dir.join(&f.rel_path);
         if target.exists() && !force {
             continue;
         }
-
-        let contents = if name == "compose.yaml" {
-            make_compose_stealth(&contents, preset)?
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        let bytes = if f.rel_path == PathBuf::from("compose.yaml") {
+            let s = std::str::from_utf8(&f.bytes).context("compose.yaml is not UTF-8")?;
+            make_compose_stealth(s, preset)?.into_bytes()
         } else {
-            contents
+            f.bytes
         };
-
-        std::fs::write(&target, contents)
+        std::fs::write(&target, bytes)
             .with_context(|| format!("Failed to write {}", target.display()))?;
     }
 

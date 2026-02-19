@@ -1,0 +1,15 @@
+name = "polyglot"
+components = [
+  "base/devcontainer",
+  "lang/python",
+  "tool/python/uv",
+  "lang/node",
+  "tool/node/pnpm",
+  "lang/go",
+  "lang/rust",
+  "tool/cpp/build-essential",
+  "extra/desktop",
+  "svc/postgres",
+  "svc/redis",
+]
+

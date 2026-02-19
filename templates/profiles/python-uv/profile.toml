@@ -1,0 +1,8 @@
+name = "python-uv"
+components = [
+  "base/devcontainer",
+  "lang/python",
+  "tool/python/uv",
+  "extra/desktop",
+]
+

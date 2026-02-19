@@ -1,0 +1,5 @@
+id = "base/devcontainer"
+name = "Dev Container Base"
+description = "Base devcontainer.json + compose.yaml + Dockerfile + postCreate runner"
+category = "Base"
+

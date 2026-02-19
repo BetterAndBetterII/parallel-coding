@@ -1,0 +1,5 @@
+id = "svc/redis"
+name = "Redis"
+description = "Redis service (compose) + forward port 6379"
+category = "Service"
+

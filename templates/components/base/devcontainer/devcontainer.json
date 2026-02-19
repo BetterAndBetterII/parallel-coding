@@ -5,12 +5,10 @@
   "workspaceFolder": "/workspaces/workspace",
   "remoteUser": "vscode",
   "updateRemoteUserUID": true,
-  "postCreateCommand": "bash -lc 'if [ -f pyproject.toml ]; then (uv sync --frozen || uv sync); fi'",
+  "postCreateCommand": "bash -lc 'bash /workspaces/workspace/.devcontainer/scripts/pc-post-create'",
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-python.python",
-        "ms-python.vscode-pylance",
         "ms-azuretools.vscode-docker"
       ]
     }

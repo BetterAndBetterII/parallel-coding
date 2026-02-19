@@ -1,0 +1,11 @@
+id = "tool/node/yarn"
+name = "Yarn"
+description = "Yarn via corepack"
+category = "Tool"
+depends = ["lang/node"]
+
+[[params]]
+key = "yarn.version"
+prompt = "Yarn version (via corepack)"
+default = "latest"
+

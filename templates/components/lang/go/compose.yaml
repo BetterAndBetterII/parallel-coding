@@ -1,0 +1,15 @@
+services:
+  dev:
+    volumes:
+      - go_mod_cache:/home/vscode/go/pkg/mod
+      - go_build_cache:/home/vscode/.cache/go-build
+    environment:
+      GOMODCACHE: /home/vscode/go/pkg/mod
+      GOCACHE: /home/vscode/.cache/go-build
+
+volumes:
+  go_mod_cache:
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-mod-cache
+  go_build_cache:
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-build-cache
+

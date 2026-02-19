@@ -1,0 +1,15 @@
+{
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "{{rust.version}}"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}
+

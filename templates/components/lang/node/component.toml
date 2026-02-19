@@ -1,0 +1,11 @@
+id = "lang/node"
+name = "Node.js"
+description = "Node.js runtime via devcontainers feature (includes corepack)"
+category = "Language"
+
+[[params]]
+key = "node.version"
+prompt = "Node.js version"
+default = "22"
+choices = ["20", "22"]
+

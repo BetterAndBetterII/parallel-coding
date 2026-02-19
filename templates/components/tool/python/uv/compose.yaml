@@ -1,0 +1,15 @@
+services:
+  dev:
+    volumes:
+      - uv_cache:/home/vscode/.cache/uv
+      - pip_cache:/home/vscode/.cache/pip
+    environment:
+      UV_CACHE_DIR: /home/vscode/.cache/uv
+      PIP_CACHE_DIR: /home/vscode/.cache/pip
+
+volumes:
+  uv_cache:
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-uv-cache
+  pip_cache:
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pip-cache
+

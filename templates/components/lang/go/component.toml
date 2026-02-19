@@ -1,0 +1,11 @@
+id = "lang/go"
+name = "Go"
+description = "Go toolchain via devcontainers feature"
+category = "Language"
+
+[[params]]
+key = "go.version"
+prompt = "Go version"
+default = "1.22"
+choices = ["1.21", "1.22", "1.23"]
+
