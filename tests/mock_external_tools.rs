@@ -121,6 +121,14 @@ exit 0
 
         let worktree = agents.join("agent-a");
         assert!(worktree.exists(), "worktree dir should exist");
+        assert!(
+            worktree.join(".devcontainer").join("devcontainer.json").exists(),
+            "agent new should materialize .devcontainer/devcontainer.json in the worktree"
+        );
+        assert!(
+            worktree.join(".devcontainer").join(".env").exists(),
+            "agent new should write .devcontainer/.env for stable compose project/env"
+        );
 
         let dc_text = fs::read_to_string(&devcontainer_log).unwrap();
         assert!(
@@ -128,8 +136,8 @@ exit 0
             "devcontainer up should be invoked: {dc_text}"
         );
         assert!(
-            dc_text.contains("--config"),
-            "stealth mode should use --config: {dc_text}"
+            !dc_text.contains("--config"),
+            "agent new should use worktree .devcontainer (no --config): {dc_text}"
         );
         assert!(
             dc_text.contains("COMPOSE_PROJECT_NAME=agent_agent_a"),

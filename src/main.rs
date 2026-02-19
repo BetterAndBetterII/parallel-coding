@@ -582,6 +582,40 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         )?;
         return Err(e);
     }
+
+    // Prefer a real .devcontainer inside the worktree so VS Code can detect it
+    // and offer "Reopen in Container". (Stealth mode is still available via `pc up`.)
+    if !workspace_has_devcontainer_config(&worktree_dir) {
+        println!(
+            "Devcontainer config missing in worktree; initializing from preset: {}",
+            args.preset
+        );
+        if let Err(e) = copy_preset(&args.preset, &worktree_dir, false) {
+            rollback_failed_agent_new(
+                &repo_root,
+                &agent_name,
+                &worktree_dir,
+                &branch_name,
+                created_branch,
+                &meta,
+            )?;
+            return Err(e);
+        }
+    }
+
+    if let Err(e) = write_devcontainer_env_if_missing(&worktree_dir, &compose_project, &cache_prefix)
+    {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &meta,
+        )?;
+        return Err(e);
+    }
+
     let mut env = vec![
         ("COMPOSE_PROJECT_NAME", compose_project.clone()),
         ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.clone()),
@@ -590,19 +624,7 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
 
-    let up_result = if workspace_has_devcontainer_config(&worktree_dir) {
-        devcontainer_up(&worktree_dir, None, &env)
-    } else {
-        devcontainer_up_stealth(
-            &worktree_dir,
-            &args.preset,
-            args.force_env,
-            &compose_project,
-            &cache_prefix,
-            args.desktop,
-        )
-        .map(|_| ())
-    };
+    let up_result = devcontainer_up(&worktree_dir, None, &env);
 
     if let Err(e) = up_result {
         rollback_failed_agent_new(
@@ -640,6 +662,27 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
             .status();
     }
 
+    Ok(())
+}
+
+fn write_devcontainer_env_if_missing(
+    worktree_dir: &Path,
+    compose_project: &str,
+    cache_prefix: &str,
+) -> Result<()> {
+    let dc_dir = worktree_dir.join(".devcontainer");
+    if !dc_dir.exists() {
+        return Ok(());
+    }
+    let env_path = dc_dir.join(".env");
+    if env_path.exists() {
+        return Ok(());
+    }
+    let text = format!(
+        "COMPOSE_PROJECT_NAME={compose_project}\nDEVCONTAINER_CACHE_PREFIX={cache_prefix}\n"
+    );
+    std::fs::write(&env_path, text)
+        .with_context(|| format!("Failed to write {}", env_path.display()))?;
     Ok(())
 }
 
