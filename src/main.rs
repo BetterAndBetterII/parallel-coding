@@ -47,16 +47,16 @@ struct InitArgs {
 struct UpArgs {
     /// Target directory
     dir: PathBuf,
-    /// Initialize if missing .devcontainer
+    /// If missing devcontainer config, write preset files into the workspace
     #[arg(long)]
     init: bool,
-    /// Preset template name (used with --init)
+    /// Preset template name (used for stealth mode and/or with --init)
     #[arg(long, default_value = "python-uv")]
     preset: String,
     /// Also bring up desktop sidecar
     #[arg(long)]
     desktop: bool,
-    /// Overwrite existing .devcontainer/.env
+    /// Overwrite generated runtime preset files (stealth mode)
     #[arg(long)]
     force_env: bool,
 }
@@ -113,7 +113,7 @@ struct AgentNewArgs {
     /// Also start desktop sidecar
     #[arg(long)]
     desktop: bool,
-    /// Overwrite existing .devcontainer/.env
+    /// Overwrite generated runtime preset files (stealth mode)
     #[arg(long)]
     force_env: bool,
     /// Do not open VS Code in a new window
@@ -160,7 +160,6 @@ fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
 fn cmd_init(args: InitArgs) -> Result<()> {
     let dir = require_existing_dir(&args.dir)?;
     copy_preset(&args.preset, &dir, args.force)?;
-    write_env_for_dir(&dir, false)?;
     println!(
         "Initialized: {} (preset: {})",
         dir.join(".devcontainer").display(),
@@ -172,51 +171,64 @@ fn cmd_init(args: InitArgs) -> Result<()> {
 fn cmd_up(args: UpArgs) -> Result<()> {
     let dir = require_existing_dir(&args.dir)?;
 
-    let devcontainer_json = dir.join(".devcontainer").join("devcontainer.json");
-    if !devcontainer_json.exists() {
-        if args.init {
-            copy_preset(&args.preset, &dir, false)?;
-        } else {
-            bail!(
-                "Missing {} (use: pc up --init ...)",
-                devcontainer_json.display()
-            );
-        }
+    let has_config = workspace_has_devcontainer_config(&dir);
+    if !has_config && args.init {
+        copy_preset(&args.preset, &dir, false)?;
     }
-
-    write_env_for_dir(&dir, args.force_env)?;
     ensure_in_path("devcontainer")?;
 
-    if args.desktop {
-        devcontainer_up(&dir, Some(("COMPOSE_PROFILES", "desktop")))?;
+    if workspace_has_devcontainer_config(&dir) {
+        let mut env = Vec::new();
+        if args.desktop {
+            env.push(("COMPOSE_PROFILES", "desktop".to_string()));
+        }
+        devcontainer_up(&dir, None, &env)?;
     } else {
-        devcontainer_up(&dir, None)?;
+        let compose_project = default_compose_project_name(&dir)?;
+        devcontainer_up_stealth(
+            &dir,
+            &args.preset,
+            args.force_env,
+            &compose_project,
+            "dc-cache",
+            args.desktop,
+        )?;
     }
     Ok(())
 }
 
 fn cmd_desktop_on(dir: PathBuf) -> Result<()> {
     let dir = require_existing_dir(&dir)?;
-    let compose_path = dir.join(".devcontainer").join("compose.yaml");
-    if !compose_path.exists() {
-        bail!(
-            "Not a devcontainer directory (missing {}): {}",
-            ".devcontainer/compose.yaml",
-            dir.display()
-        );
-    }
     ensure_in_path("devcontainer")?;
-    write_env_for_dir(&dir, false)?;
-    devcontainer_up(&dir, Some(("COMPOSE_PROFILES", "desktop")))?;
 
+    if workspace_has_devcontainer_config(&dir) {
+        devcontainer_up(&dir, None, &[("COMPOSE_PROFILES", "desktop".to_string())])?;
+        if is_in_path("docker") {
+            if let Some(url) = try_get_desktop_url_local(&dir)? {
+                println!("Desktop URL: {url}");
+            } else {
+                println!("Desktop started. To get the URL:");
+                println!(
+                    "  (cd \"{}\" && docker compose -f compose.yaml port desktop 3000)",
+                    dir.join(".devcontainer").display()
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let compose_project = default_compose_project_name(&dir)?;
+    let (preset_dir, env) =
+        devcontainer_up_stealth(&dir, "python-uv", false, &compose_project, "dc-cache", true)?;
     if is_in_path("docker") {
-        if let Some(url) = try_get_desktop_url(&dir)? {
+        if let Some(url) = try_get_desktop_url_from_compose(&preset_dir, &compose_project, &env)? {
             println!("Desktop URL: {url}");
         } else {
             println!("Desktop started. To get the URL:");
             println!(
-                "  (cd \"{}\" && docker compose -f compose.yaml port desktop 3000)",
-                dir.join(".devcontainer").display()
+                "  (cd \"{}\" && docker compose -p {} -f compose.yaml port desktop 3000)",
+                preset_dir.display(),
+                compose_project
             );
         }
     }
@@ -270,38 +282,44 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     let worktree_dir = std::fs::canonicalize(&worktree_dir)
         .with_context(|| format!("Failed to resolve worktree dir: {}", worktree_dir.display()))?;
 
-    let compose_project = format!("agent_{}", sanitize_compose(&args.agent_name));
-    let env_file = worktree_dir.join(".devcontainer").join(".env");
-    std::fs::create_dir_all(worktree_dir.join(".devcontainer"))
-        .context("Failed to create .devcontainer directory")?;
-
-    if env_file.exists() && !args.force_env {
-        bail!(
-            "{} already exists. Use --force-env to overwrite.",
-            env_file.display()
-        );
-    }
-
-    let env_contents = format!(
-        "# Auto-generated by pc\nCOMPOSE_PROJECT_NAME={}\nDEVCONTAINER_CACHE_PREFIX={}\n",
-        compose_project,
-        sanitize_compose(&repo_name)
-    );
-    std::fs::write(&env_file, env_contents)
-        .with_context(|| format!("Failed to write {}", env_file.display()))?;
-
     println!("Worktree: {}", worktree_dir.display());
     println!("Branch:   {branch_name}");
-    println!("Compose:  {compose_project}");
 
     if args.no_up {
         return Ok(());
     }
 
     ensure_in_path("devcontainer")?;
-    devcontainer_up(&worktree_dir, None)?;
-    if args.desktop {
-        devcontainer_up(&worktree_dir, Some(("COMPOSE_PROFILES", "desktop")))?;
+    if workspace_has_devcontainer_config(&worktree_dir) {
+        devcontainer_up(&worktree_dir, None, &[])?;
+        if args.desktop {
+            devcontainer_up(
+                &worktree_dir,
+                None,
+                &[("COMPOSE_PROFILES", "desktop".to_string())],
+            )?;
+        }
+    } else {
+        let compose_project = format!("agent_{}", sanitize_compose(&args.agent_name));
+        println!("Compose:  {compose_project}");
+        devcontainer_up_stealth(
+            &worktree_dir,
+            "python-uv",
+            args.force_env,
+            &compose_project,
+            &sanitize_compose(&repo_name),
+            false,
+        )?;
+        if args.desktop {
+            devcontainer_up_stealth(
+                &worktree_dir,
+                "python-uv",
+                args.force_env,
+                &compose_project,
+                &sanitize_compose(&repo_name),
+                true,
+            )?;
+        }
     }
 
     if !args.no_open && is_in_path("code") {
@@ -340,41 +358,68 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_env_for_dir(dir: &Path, force_env: bool) -> Result<()> {
-    let devcontainer_dir = dir.join(".devcontainer");
-    std::fs::create_dir_all(&devcontainer_dir)
-        .with_context(|| format!("Failed to create {}", devcontainer_dir.display()))?;
+fn devcontainer_up(
+    dir: &Path,
+    override_config: Option<&Path>,
+    env: &[(&str, String)],
+) -> Result<()> {
+    let mut cmd = Command::new("devcontainer");
+    cmd.arg("up").arg("--workspace-folder").arg(dir);
+    if let Some(cfg) = override_config {
+        cmd.arg("--override-config").arg(cfg);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    run_ok(cmd).context("devcontainer up failed")?;
+    Ok(())
+}
 
-    let env_file = devcontainer_dir.join(".env");
-    if env_file.exists() && !force_env {
-        return Ok(());
+fn devcontainer_up_stealth(
+    dir: &Path,
+    preset: &str,
+    force_runtime: bool,
+    compose_project: &str,
+    cache_prefix: &str,
+    desktop: bool,
+) -> Result<(PathBuf, Vec<(&'static str, String)>)> {
+    let abs = std::fs::canonicalize(dir)
+        .with_context(|| format!("Failed to resolve directory: {}", dir.display()))?;
+
+    let dc_dir = templates::ensure_runtime_preset_stealth(preset, force_runtime)?;
+    let dc_json = dc_dir.join("devcontainer.json");
+
+    let mut env = vec![
+        ("PC_WORKSPACE_DIR", abs.to_string_lossy().to_string()),
+        ("PC_DEVCONTAINER_DIR", dc_dir.to_string_lossy().to_string()),
+        ("COMPOSE_PROJECT_NAME", compose_project.to_string()),
+        ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.to_string()),
+    ];
+    if desktop {
+        env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
 
+    devcontainer_up(&abs, Some(&dc_json), &env)?;
+    Ok((dc_dir, env))
+}
+
+fn workspace_has_devcontainer_config(dir: &Path) -> bool {
+    dir.join(".devcontainer").join("devcontainer.json").exists()
+        || dir.join(".devcontainer.json").exists()
+}
+
+fn default_compose_project_name(dir: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(dir)
         .with_context(|| format!("Failed to resolve directory: {}", dir.display()))?;
     let base = abs
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("workspace");
-
-    let project = format!("dc_{}_{}", sanitize_compose(base), short_hash(&abs));
-    let contents = format!(
-        "# Auto-generated by pc\nCOMPOSE_PROJECT_NAME={}\nDEVCONTAINER_CACHE_PREFIX=dc-cache\n",
-        project
-    );
-    std::fs::write(&env_file, contents)
-        .with_context(|| format!("Failed to write {}", env_file.display()))?;
-    Ok(())
-}
-
-fn devcontainer_up(dir: &Path, env: Option<(&str, &str)>) -> Result<()> {
-    let mut cmd = Command::new("devcontainer");
-    cmd.arg("up").arg("--workspace-folder").arg(dir);
-    if let Some((k, v)) = env {
-        cmd.env(k, v);
-    }
-    run_ok(cmd).context("devcontainer up failed")?;
-    Ok(())
+    Ok(format!(
+        "dc_{}_{}",
+        sanitize_compose(base),
+        short_hash(&abs)
+    ))
 }
 
 fn ensure_in_path(bin: &str) -> Result<()> {
@@ -496,10 +541,11 @@ fn git_worktree_add(worktree_dir: &Path, branch_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn try_get_desktop_url(dir: &Path) -> Result<Option<String>> {
+fn try_get_desktop_url_local(dir: &Path) -> Result<Option<String>> {
     let dc_dir = dir.join(".devcontainer");
     let output = Command::new("docker")
         .current_dir(&dc_dir)
+        .env("COMPOSE_PROFILES", "desktop")
         .args(["compose", "-f", "compose.yaml", "port", "desktop", "3000"])
         .output()
         .context("Failed to run docker compose port")?;
@@ -512,6 +558,41 @@ fn try_get_desktop_url(dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     // docker compose port prints like "0.0.0.0:49153" or "127.0.0.1:49153"
+    let (host, port) = mapping
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("Unexpected docker port output: {mapping:?}"))?;
+    let host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+    Ok(Some(format!("http://{host}:{port}/")))
+}
+
+fn try_get_desktop_url_from_compose(
+    dc_dir: &Path,
+    compose_project: &str,
+    env: &[(&str, String)],
+) -> Result<Option<String>> {
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(dc_dir).args([
+        "compose",
+        "-p",
+        compose_project,
+        "-f",
+        "compose.yaml",
+        "port",
+        "desktop",
+        "3000",
+    ]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().context("Failed to run docker compose port")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let s = String::from_utf8_lossy(&output.stdout);
+    let mapping = s.trim();
+    if mapping.is_empty() {
+        return Ok(None);
+    }
     let (host, port) = mapping
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("Unexpected docker port output: {mapping:?}"))?;
