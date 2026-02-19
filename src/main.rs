@@ -3,6 +3,7 @@ use std::process::{Command, ExitStatus};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 
 mod templates;
 
@@ -98,12 +99,23 @@ enum AgentCommands {
     New(AgentNewArgs),
     /// Start the optional desktop (webtop) sidecar for a given worktree path
     DesktopOn(AgentDesktopOnArgs),
+    /// Remove an agent: docker compose down + git worktree remove (+ branch delete)
+    Rm(AgentRmArgs),
 }
 
 #[derive(Args, Debug)]
 struct AgentNewArgs {
     /// Agent name (used in branch name and compose project name)
     agent_name: String,
+    /// Base branch/ref for the new worktree branch (default: current HEAD)
+    #[arg(long)]
+    base: Option<String>,
+    /// Select base branch with an interactive TUI (sorted by recent updates)
+    #[arg(long)]
+    select_base: bool,
+    /// Devcontainer template preset to use when the worktree has no .devcontainer
+    #[arg(long, default_value = "python-uv")]
+    preset: String,
     /// Base directory to place worktrees
     #[arg(long)]
     base_dir: Option<PathBuf>,
@@ -127,6 +139,21 @@ struct AgentDesktopOnArgs {
     worktree_path: PathBuf,
 }
 
+#[derive(Args, Debug)]
+struct AgentRmArgs {
+    /// Agent name (used in branch name and default worktree path)
+    agent_name: String,
+    /// Base directory to place worktrees (for locating existing worktree dir)
+    #[arg(long)]
+    base_dir: Option<PathBuf>,
+    /// Keep the agent branch (do not `git branch -D`)
+    #[arg(long)]
+    keep_branch: bool,
+    /// Force removal (passes --force to git worktree remove)
+    #[arg(long)]
+    force: bool,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -137,6 +164,7 @@ fn main() -> Result<()> {
         Commands::Agent(args) => match args.command {
             AgentCommands::New(a) => cmd_agent_new(a),
             AgentCommands::DesktopOn(a) => cmd_desktop_on(a.worktree_path),
+            AgentCommands::Rm(a) => cmd_agent_rm(a),
         },
     }
 }
@@ -149,7 +177,28 @@ fn cmd_templates(args: TemplatesArgs) -> Result<()> {
 
 fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
     for preset in templates::embedded_presets() {
-        let dir = templates::install_embedded_preset(preset, args.force)?;
+        let dir = match templates::install_embedded_preset(preset, args.force) {
+            Ok(d) => d,
+            Err(e)
+                if !args.force
+                    && can_prompt()
+                    && e.downcast_ref::<templates::ForceRequired>().is_some() =>
+            {
+                let ok = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt(format!(
+                        "Template files already exist for preset {preset}. Overwrite? (equivalent to --force)"
+                    ))
+                    .default(false)
+                    .interact()
+                    .context("Prompt failed")?;
+                if !ok {
+                    println!("Skipped preset {preset} (left existing files).");
+                    continue;
+                }
+                templates::install_embedded_preset(preset, true)?
+            }
+            Err(e) => return Err(e),
+        };
         println!("Installed preset {preset} into {}", dir.display());
     }
     println!("Edit templates under $HOME/.pc/templates/<preset>/ to customize.");
@@ -266,7 +315,32 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     }
 
     let branch_name = format!("agent/{}", args.agent_name);
-    git_worktree_add(&worktree_dir, &branch_name)?;
+    if let Some(existing) = git_worktree_path_for_basename(&args.agent_name)? {
+        bail!(
+            "A worktree directory with the same name already exists: {}",
+            existing.display()
+        );
+    }
+    if let Some(existing) = git_worktree_path_for_branch(&branch_name)? {
+        bail!(
+            "Worktree for branch {} already exists at: {}",
+            branch_name,
+            existing.display()
+        );
+    }
+
+    if args.select_base && args.base.is_some() {
+        bail!("Use either --base or --select-base, not both.");
+    }
+
+    let base_ref = if args.select_base {
+        select_base_branch_tui()?
+    } else {
+        args.base.clone().unwrap_or_else(|| "HEAD".to_string())
+    };
+
+    ensure_git_ref_exists(&base_ref)?;
+    git_worktree_add(&worktree_dir, &branch_name, &base_ref)?;
     let worktree_dir = std::fs::canonicalize(&worktree_dir)
         .with_context(|| format!("Failed to resolve worktree dir: {}", worktree_dir.display()))?;
 
@@ -276,10 +350,25 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         .context("Failed to create .devcontainer directory")?;
 
     if env_file.exists() && !args.force_env {
-        bail!(
-            "{} already exists. Use --force-env to overwrite.",
-            env_file.display()
-        );
+        if can_prompt() {
+            let ok = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "{} already exists. Overwrite it? (equivalent to --force-env)",
+                    env_file.display()
+                ))
+                .default(false)
+                .interact()
+                .context("Prompt failed")?;
+            if !ok {
+                println!("Cancelled. Left existing {}", env_file.display());
+                return Ok(());
+            }
+        } else {
+            bail!(
+                "{} already exists. Use --force-env to overwrite.",
+                env_file.display()
+            );
+        }
     }
 
     let env_contents = format!(
@@ -289,6 +378,7 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     );
     std::fs::write(&env_file, env_contents)
         .with_context(|| format!("Failed to write {}", env_file.display()))?;
+    ensure_git_exclude(&worktree_dir, ".devcontainer/.env")?;
 
     println!("Worktree: {}", worktree_dir.display());
     println!("Branch:   {branch_name}");
@@ -296,6 +386,18 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
 
     if args.no_up {
         return Ok(());
+    }
+
+    let devcontainer_json = worktree_dir.join(".devcontainer").join("devcontainer.json");
+    if !devcontainer_json.exists() {
+        println!(
+            "Devcontainer config missing in worktree; initializing from preset: {}",
+            args.preset
+        );
+        copy_preset(&args.preset, &worktree_dir, false)?;
+        ensure_git_exclude(&worktree_dir, ".devcontainer/devcontainer.json")?;
+        ensure_git_exclude(&worktree_dir, ".devcontainer/compose.yaml")?;
+        ensure_git_exclude(&worktree_dir, ".devcontainer/Dockerfile")?;
     }
 
     ensure_in_path("devcontainer")?;
@@ -314,6 +416,74 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     Ok(())
 }
 
+fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
+    if !is_valid_agent_name(&args.agent_name) {
+        bail!("agent-name must match: [A-Za-z0-9._-]+");
+    }
+    ensure_in_path("git")?;
+
+    let repo_root = git_repo_root()?;
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("Failed to get repo name from path: {}", repo_root.display()))?
+        .to_string();
+
+    let worktree_base_dir = if let Some(d) = args.base_dir {
+        d
+    } else if let Some(env) = std::env::var_os("AGENT_WORKTREE_BASE_DIR") {
+        PathBuf::from(env)
+    } else {
+        let parent = repo_root
+            .parent()
+            .ok_or_else(|| anyhow!("Repo root has no parent: {}", repo_root.display()))?;
+        parent.join(format!("{repo_name}-agents"))
+    };
+
+    let expected_dir = worktree_base_dir.join(&args.agent_name);
+    let branch_name = format!("agent/{}", args.agent_name);
+
+    let worktree_dir = if expected_dir.exists() {
+        expected_dir
+    } else if let Some(p) = git_worktree_path_for_branch(&branch_name)? {
+        p
+    } else {
+        bail!(
+            "Agent worktree not found. Expected path: {} (branch: {})",
+            expected_dir.display(),
+            branch_name
+        );
+    };
+
+    let worktree_dir = std::fs::canonicalize(&worktree_dir)
+        .with_context(|| format!("Failed to resolve {}", worktree_dir.display()))?;
+
+    docker_compose_down_if_present(&worktree_dir)?;
+    let removed = git_worktree_remove(&worktree_dir, args.force)?;
+    if !removed {
+        println!(
+            "Cancelled. Worktree not removed: {}",
+            worktree_dir.display()
+        );
+        return Ok(());
+    }
+
+    if !args.keep_branch {
+        if git_branch_exists(&branch_name)? {
+            let status = Command::new("git")
+                .args(["branch", "-D", &branch_name])
+                .status()
+                .context("Failed to run git branch -D")?;
+            if !status.success() {
+                bail!("git branch -D failed with status: {status}");
+            }
+        }
+    }
+
+    println!("Removed agent {}", args.agent_name);
+    Ok(())
+}
+
 fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
     let files = templates::preset_files(preset)?;
 
@@ -321,13 +491,28 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
     std::fs::create_dir_all(&devcontainer_dir)
         .with_context(|| format!("Failed to create {}", devcontainer_dir.display()))?;
 
+    let needs_overwrite = files
+        .iter()
+        .any(|(name, _)| devcontainer_dir.join(name).exists());
+    let overwrite_all = if force {
+        true
+    } else if needs_overwrite && can_prompt() {
+        Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "Some files already exist under {}. Overwrite them? (equivalent to --force)",
+                devcontainer_dir.display()
+            ))
+            .default(false)
+            .interact()
+            .context("Prompt failed")?
+    } else {
+        false
+    };
+
     for (name, contents) in files {
         let target = devcontainer_dir.join(&name);
-        if target.exists() && !force {
-            bail!(
-                "{} already exists. Use --force to overwrite.",
-                target.display()
-            );
+        if target.exists() && !overwrite_all {
+            continue;
         }
         std::fs::write(&target, contents).with_context(|| {
             format!(
@@ -468,12 +653,39 @@ fn git_repo_root() -> Result<PathBuf> {
 fn git_has_commit() -> Result<bool> {
     let status = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("Failed to run git rev-parse --verify HEAD")?;
     Ok(status.success())
 }
 
-fn git_worktree_add(worktree_dir: &Path, branch_name: &str) -> Result<()> {
+fn git_branch_exists(branch_name: &str) -> Result<bool> {
+    let ref_name = format!("refs/heads/{branch_name}");
+    let status = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &ref_name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run git show-ref --verify")?;
+    Ok(status.success())
+}
+
+fn ensure_git_ref_exists(name: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run git rev-parse --verify")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("Base ref not found: {name}");
+    }
+}
+
+fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<()> {
     let ref_name = format!("refs/heads/{branch_name}");
     let branch_exists = Command::new("git")
         .args(["show-ref", "--verify", "--quiet", &ref_name])
@@ -490,9 +702,234 @@ fn git_worktree_add(worktree_dir: &Path, branch_name: &str) -> Result<()> {
         cmd.args(["worktree", "add", "-b"])
             .arg(branch_name)
             .arg(worktree_dir)
-            .arg("HEAD");
+            .arg(base_ref);
     }
     run_ok(cmd).context("git worktree add failed")?;
+    Ok(())
+}
+
+fn git_worktree_remove(path: &Path, force: bool) -> Result<bool> {
+    if !force {
+        return git_worktree_remove_interactive(path);
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.args(["worktree", "remove"]);
+    if force {
+        cmd.arg("--force");
+    }
+    cmd.arg(path);
+    run_ok(cmd).context("git worktree remove failed")?;
+    Ok(true)
+}
+
+fn git_worktree_remove_interactive(path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["worktree", "remove"])
+        .arg(path)
+        .output()
+        .context("Failed to run git worktree remove")?;
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_trimmed = stderr.trim();
+
+    let suggests_force = stderr_trimmed.contains("use --force");
+    if suggests_force && can_prompt() {
+        println!("{stderr_trimmed}");
+        let ok = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "git worktree remove failed ({}). Retry with --force?",
+                path.display()
+            ))
+            .default(false)
+            .interact()
+            .context("Prompt failed")?;
+        if !ok {
+            return Ok(false);
+        }
+        let status = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .status()
+            .context("Failed to run git worktree remove --force")?;
+        if status.success() {
+            return Ok(true);
+        }
+        bail!("git worktree remove --force failed with status: {status}");
+    }
+
+    if stderr_trimmed.is_empty() {
+        bail!("git worktree remove failed with status: {}", output.status);
+    }
+    bail!("git worktree remove failed: {stderr_trimmed}");
+}
+
+fn git_worktree_path_for_branch(branch_name: &str) -> Result<Option<PathBuf>> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .context("Failed to run git worktree list")?;
+    if !output.status.success() {
+        bail!("git worktree list failed");
+    }
+    let text = String::from_utf8(output.stdout).context("git output not utf8")?;
+
+    let wanted = format!("refs/heads/{branch_name}");
+    let mut current_path: Option<PathBuf> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(rest.trim()));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("branch ") {
+            if rest.trim() == wanted {
+                return Ok(current_path.clone());
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn git_worktree_path_for_basename(name: &str) -> Result<Option<PathBuf>> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .context("Failed to run git worktree list")?;
+    if !output.status.success() {
+        bail!("git worktree list failed");
+    }
+    let text = String::from_utf8(output.stdout).context("git output not utf8")?;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            let p = PathBuf::from(rest.trim());
+            if p.file_name().and_then(|s| s.to_str()) == Some(name) {
+                return Ok(Some(p));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn docker_compose_down_if_present(worktree_dir: &Path) -> Result<()> {
+    if !is_in_path("docker") {
+        return Ok(());
+    }
+    let dc_dir = worktree_dir.join(".devcontainer");
+    let compose = dc_dir.join("compose.yaml");
+    if !compose.exists() {
+        return Ok(());
+    }
+
+    let env_file = dc_dir.join(".env");
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(&dc_dir)
+        .args(["compose", "-f", "compose.yaml"]);
+    if env_file.exists() {
+        cmd.args(["--env-file", ".env"]);
+    }
+    cmd.args(["down", "-v", "--remove-orphans"]);
+
+    let status = cmd
+        .status()
+        .context("Failed to spawn docker compose down")?;
+    if !status.success() {
+        bail!("docker compose down failed with status: {status}");
+    }
+    Ok(())
+}
+
+fn select_base_branch_tui() -> Result<String> {
+    if !dialoguer::console::Term::stdout().is_term() {
+        bail!("--select-base requires a TTY");
+    }
+
+    let branches = git_local_branches_by_recent()?;
+    if branches.is_empty() {
+        bail!("No local branches found");
+    }
+
+    let items: Vec<String> = branches
+        .iter()
+        .map(|b| format!("{}  ({})", b.name, b.committer_date))
+        .collect();
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select base branch")
+        .items(&items)
+        .default(0)
+        .interact()
+        .context("TUI selection failed")?;
+    Ok(branches[selection].name.clone())
+}
+
+struct BranchInfo {
+    name: String,
+    committer_date: String,
+}
+
+fn git_local_branches_by_recent() -> Result<Vec<BranchInfo>> {
+    let output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\t%(committerdate:iso8601)",
+            "refs/heads/",
+        ])
+        .output()
+        .context("Failed to run git for-each-ref")?;
+    if !output.status.success() {
+        bail!("git for-each-ref failed");
+    }
+    let text = String::from_utf8(output.stdout).context("git output not utf8")?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (name, date) = line.split_once('\t').unwrap_or((line, ""));
+        out.push(BranchInfo {
+            name: name.to_string(),
+            committer_date: date.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn can_prompt() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn ensure_git_exclude(worktree_dir: &Path, pattern: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .output()
+        .context("Failed to run git rev-parse --git-path info/exclude")?;
+    if !output.status.success() {
+        bail!("git rev-parse --git-path info/exclude failed");
+    }
+    let path = String::from_utf8(output.stdout).context("git output not utf8")?;
+    let exclude_path = PathBuf::from(path.trim());
+    let mut existing = String::new();
+    if exclude_path.exists() {
+        existing = std::fs::read_to_string(&exclude_path)
+            .with_context(|| format!("Failed to read {}", exclude_path.display()))?;
+        if existing.lines().any(|l| l.trim() == pattern) {
+            return Ok(());
+        }
+    }
+    if !existing.ends_with('\n') && !existing.is_empty() {
+        existing.push('\n');
+    }
+    existing.push_str(pattern);
+    existing.push('\n');
+    std::fs::write(&exclude_path, existing)
+        .with_context(|| format!("Failed to write {}", exclude_path.display()))?;
     Ok(())
 }
 

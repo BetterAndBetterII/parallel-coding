@@ -1,8 +1,22 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 
 const EMBEDDED_PRESETS: &[&str] = &["python-uv"];
+
+#[derive(Debug)]
+pub struct ForceRequired {
+    pub target: PathBuf,
+}
+
+impl fmt::Display for ForceRequired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Target exists: {}", self.target.display())
+    }
+}
+
+impl std::error::Error for ForceRequired {}
 
 fn pc_home_dir() -> Option<PathBuf> {
     if let Some(v) = std::env::var_os("PC_HOME") {
@@ -84,10 +98,7 @@ pub fn install_embedded_preset(preset: &str, force: bool) -> Result<PathBuf> {
     for (name, contents) in files {
         let target = dir.join(name);
         if target.exists() && !force {
-            bail!(
-                "{} already exists. Use --force to overwrite.",
-                target.display()
-            );
+            return Err(ForceRequired { target }.into());
         }
         std::fs::write(&target, contents)
             .with_context(|| format!("Failed to write {}", target.display()))?;

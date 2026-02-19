@@ -55,7 +55,21 @@ pc agent new agent-a
 
 要求当前仓库至少有 1 个 commit（否则 `git worktree` 会创建 orphan 分支，worktree 为空，进而找不到 `.devcontainer/devcontainer.json`）。
 
+如果 worktree 里没有 `.devcontainer/devcontainer.json`，会自动用 `--preset`（默认 `python-uv`）初始化（优先读取 `$HOME/.pc/templates/<preset>/` 的自定义模板）。
+
 默认 worktree 会创建在：`<repo>/../<repo-name>-agents/<agent-name>`，也可用 `--base-dir` 或环境变量 `AGENT_WORKTREE_BASE_DIR` 指定。
+
+选择基分支（按最近更新排序，用上下键选择）：
+
+```bash
+pc agent new agent-a --select-base
+```
+
+或直接指定：
+
+```bash
+pc agent new agent-a --base main
+```
 
 可选启动桌面 sidecar：
 
@@ -73,4 +87,10 @@ pc agent desktop-on /path/to/worktree
 
 ```bash
 pc desktop-on /path/to/dir
+```
+
+### 4) 删除 agent（停止 docker + 删除 worktree + 可选删除分支）
+
+```bash
+pc agent rm agent-a
 ```
