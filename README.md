@@ -65,9 +65,9 @@ pc init . --preset python-uv
 pc agent new agent-a
 ```
 
-要求当前仓库至少有 1 个 commit（否则 `git worktree` 会创建 orphan 分支，worktree 为空，进而找不到 `.devcontainer/devcontainer.json`）。
+要求当前仓库至少有 1 个 commit（否则 `git worktree` 会创建 orphan 分支，worktree 为空）。
 
-如果 worktree 里没有 `.devcontainer/devcontainer.json`，会自动用 `--preset`（默认 `python-uv`）初始化（优先读取 `$HOME/.pc/templates/<preset>/` 的自定义模板）。
+如果 worktree 里没有 devcontainer 配置（例如没有 `.devcontainer/devcontainer.json`），`pc` 会用 `--preset`（默认 `python-uv`）走 “stealth” 模式：用 `devcontainer up --override-config` 指向 `$HOME/.pc/templates/<preset>/`（没有则用内置模板），不需要把 `.devcontainer/` 写进你的仓库/工作区。
 
 默认 worktree 会创建在：`<repo>/../<repo-name>-agents/<agent-name>`，也可用 `--base-dir` 或环境变量 `AGENT_WORKTREE_BASE_DIR` 指定。
 
@@ -106,3 +106,8 @@ pc desktop-on /path/to/dir
 ```bash
 pc agent rm agent-a
 ```
+
+说明：
+
+- `pc agent rm` **只删除 worktree**，不会删除 `agent/<name>` 分支（如需删除可手动 `git branch -D agent/<name>`）。
+- 如果 worktree 里存在未提交的修改或未追踪文件，`git worktree remove` 可能会提示需要 `--force`；`pc` 会展示 `git status --porcelain` 并让你选择是否重试（默认 `no`）。

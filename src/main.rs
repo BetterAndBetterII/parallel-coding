@@ -582,7 +582,11 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
             worktree_dir.display()
         );
     }
-    if !worktree_dir.join(".devcontainer").join("compose.yaml").exists() {
+    if !worktree_dir
+        .join(".devcontainer")
+        .join("compose.yaml")
+        .exists()
+    {
         if let Err(e) = docker_compose_down_stealth(&worktree_dir, &meta) {
             eprintln!(
                 "Warning: docker compose down (stealth) failed for {}: {e:#}",
@@ -825,8 +829,8 @@ fn read_agent_meta(agent_name: &str) -> Result<Option<AgentMeta>> {
     if !path.exists() {
         return Ok(None);
     }
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
     Ok(Some(serde_json::from_str::<AgentMeta>(&text)?))
 }
 
@@ -872,17 +876,6 @@ fn git_has_commit() -> Result<bool> {
     Ok(status.success())
 }
 
-fn git_branch_exists(branch_name: &str) -> Result<bool> {
-    let ref_name = format!("refs/heads/{branch_name}");
-    let status = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &ref_name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("Failed to run git show-ref --verify")?;
-    Ok(status.success())
-}
-
 fn ensure_git_ref_exists(name: &str) -> Result<()> {
     let status = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", name])
@@ -922,8 +915,9 @@ fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> R
 
 fn git_worktree_remove(path: &Path, force: bool) -> Result<bool> {
     if force {
-        run_ok(Command::new("git").args(["worktree", "remove", "--force"]).arg(path))
-            .context("git worktree remove failed")?;
+        let mut cmd = Command::new("git");
+        cmd.args(["worktree", "remove", "--force"]).arg(path);
+        run_ok(cmd).context("git worktree remove failed")?;
         return Ok(true);
     }
     git_worktree_remove_interactive(path)
