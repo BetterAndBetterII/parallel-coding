@@ -56,7 +56,7 @@ jobs:
         id: meta
         shell: bash
         run: |
-          version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; data=json.load(sys.stdin); root=data["resolve"]["root"]; pkg=next(p for p in data["packages"] if p["id"]==root); print(pkg["version"])')"
+          version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; data=json.load(sys.stdin); root=(data.get("workspace_default_members") or data.get("workspace_members") or [data["packages"][0]["id"]])[0]; pkg=next(p for p in data["packages"] if p["id"]==root); print(pkg["version"])')"
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
