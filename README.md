@@ -12,7 +12,7 @@
 当前提供：`x86_64-unknown-linux-gnu`。
 
 ```bash
-curl -fsSL https://github.com/BetterAndBetterII/parallel-coding/releases/latest/download/pc-x86_64-unknown-linux-gnu -o /tmp/pc && sudo install -m 755 /tmp/pc /usr/local/bin/pc && rm /tmp/pc
+PC_VERSION="$(git ls-remote --tags --refs --sort='-v:refname' https://github.com/BetterAndBetterII/parallel-coding.git 'v*' | head -n1 | awk -F/ '{print $3}')" && curl -fsSL "https://github.com/BetterAndBetterII/parallel-coding/releases/download/${PC_VERSION}/pc-x86_64-unknown-linux-gnu" -o /tmp/pc && sudo install -m 755 /tmp/pc /usr/local/bin/pc && rm /tmp/pc
 ```
 
 安装后可在任意目录使用：
