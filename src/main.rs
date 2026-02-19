@@ -530,7 +530,10 @@ fn cmd_templates_tui() -> Result<()> {
             3 => edit_profile_file_tui()?,
             4 => render_profile_to_template_tui()?,
             5 => {
-                cmd_templates_init(TemplatesInitArgs { force: false })?;
+                cmd_templates_init(TemplatesInitArgs {
+                    force: false,
+                    non_interactive: false,
+                })?;
             }
             6 => break,
             _ => {}
