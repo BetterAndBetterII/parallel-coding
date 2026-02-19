@@ -419,7 +419,7 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         bail!("Worktree path already exists: {}", worktree_dir.display());
     }
 
-    let branch_name = format!("agent/{}", args.agent_name);
+    let branch_name = args.agent_name.clone();
     if let Some(existing) = git_worktree_path_for_basename(&args.agent_name)? {
         bail!(
             "A worktree directory with the same name already exists: {}",
@@ -546,7 +546,7 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     };
 
     let expected_dir = worktree_base_dir.join(&args.agent_name);
-    let branch_name = format!("agent/{}", args.agent_name);
+    let branch_name = args.agent_name.clone();
 
     let worktree_dir = if expected_dir.exists() {
         expected_dir
