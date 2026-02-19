@@ -698,10 +698,21 @@ fn devcontainer_up_stealth(
     let dc_dir = templates::ensure_runtime_preset_stealth(preset, force_runtime)?;
     let dc_json = dc_dir.join("devcontainer.json");
 
-    let image = devcontainer_image_tag_for_dir(&dc_dir)?;
-    if let Some(img) = &image {
-        ensure_docker_image_built(&dc_dir, img)?;
-    }
+    let uses_image = dc_dir
+        .join("compose.yaml")
+        .exists()
+        && std::fs::read_to_string(dc_dir.join("compose.yaml"))
+            .map(|s| s.contains("DEVCONTAINER_IMAGE"))
+            .unwrap_or(false);
+    let image = if uses_image {
+        let image = devcontainer_image_tag_for_dir(&dc_dir)?;
+        if let Some(img) = &image {
+            ensure_docker_image_built(&dc_dir, img)?;
+        }
+        image
+    } else {
+        None
+    };
 
     let mut env = vec![
         ("PC_WORKSPACE_DIR", abs.to_string_lossy().to_string()),
