@@ -1,10 +1,14 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 use pc_cli::agent_name::{derive_agent_name_from_branch, is_valid_agent_name};
 
@@ -1434,15 +1438,27 @@ fn ensure_external_cache_volumes_exist(compose_path: &Path, cache_prefix: &str) 
 }
 
 fn ensure_docker_volume(name: &str) -> Result<()> {
-    let status = Command::new("docker")
+    // `docker volume create` prints the volume name to stdout; keep it quiet to
+    // avoid confusing users (and avoid looking like a hang before devcontainer output).
+    let output = Command::new("docker")
         .args(["volume", "create", name])
-        .status()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
         .context("Failed to run docker volume create")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("docker volume create {name} failed with status: {status}");
+    if output.status.success() {
+        return Ok(());
     }
+    let code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        bail!("docker volume create {name} failed (exit {code})");
+    }
+    bail!("docker volume create {name} failed (exit {code}): {stderr}");
 }
 
 fn devcontainer_up_stealth(
@@ -1563,19 +1579,58 @@ fn command_string(cmd: &Command) -> String {
 
 fn run_ok_capture_output(mut cmd: Command) -> Result<ExitStatus> {
     let cmd_str = command_string(&cmd);
-    let output = cmd.output().context("Failed to spawn command")?;
-    if output.status.success() {
-        return Ok(output.status);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("Failed to spawn command")?;
+
+    let last_activity_ms = Arc::new(AtomicU64::new(now_ms()));
+    let spinner_visible = Arc::new(AtomicBool::new(false));
+    let spinner_done = Arc::new(AtomicBool::new(false));
+    let spinner_handle = start_spinner_if_tty(
+        &cmd_str,
+        last_activity_ms.clone(),
+        spinner_visible.clone(),
+        spinner_done.clone(),
+    );
+
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture stdout for: {cmd_str}"))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture stderr for: {cmd_str}"))?;
+
+    let stdout_thread = {
+        let last_activity_ms = last_activity_ms.clone();
+        let spinner_visible = spinner_visible.clone();
+        std::thread::spawn(move || tee_pipe(&mut stdout_pipe, false, &last_activity_ms, &spinner_visible))
+    };
+    let stderr_thread = {
+        let last_activity_ms = last_activity_ms.clone();
+        let spinner_visible = spinner_visible.clone();
+        std::thread::spawn(move || tee_pipe(&mut stderr_pipe, true, &last_activity_ms, &spinner_visible))
+    };
+
+    let status = child.wait().context("Failed to wait for command")?;
+    spinner_done.store(true, Ordering::Relaxed);
+    if let Some(h) = spinner_handle {
+        let _ = h.join();
+    }
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    if status.success() {
+        return Ok(status);
     }
 
-    let code = output
-        .status
+    let code = status
         .code()
         .map(|c| c.to_string())
         .unwrap_or_else(|| "signal".to_string());
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
     let details = if !stderr.is_empty() { stderr } else { stdout };
     let details = if details.is_empty() {
         "<no output>".to_string()
@@ -1589,6 +1644,127 @@ fn run_ok_capture_output(mut cmd: Command) -> Result<ExitStatus> {
     };
 
     bail!("{cmd_str} failed (exit {code}): {details}");
+}
+
+fn start_spinner_if_tty(
+    cmd_str: &str,
+    last_activity_ms: Arc<AtomicU64>,
+    spinner_visible: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    use std::io::IsTerminal;
+
+    if std::env::var_os("PC_NO_SPINNER").is_some() {
+        return None;
+    }
+    if !std::io::stderr().is_terminal() {
+        return None;
+    }
+
+    let cmd_str = cmd_str.to_string();
+    Some(std::thread::spawn(move || {
+        let frames = ['|', '/', '-', '\\'];
+        let mut idx = 0usize;
+        let mut last_draw = 0u64;
+        let quiet_ms = 800u64;
+        let redraw_ms = 120u64;
+
+        while !done.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(redraw_ms));
+            let now = now_ms();
+            let last = last_activity_ms.load(Ordering::Relaxed);
+            if now.saturating_sub(last) < quiet_ms {
+                continue;
+            }
+            if now.saturating_sub(last_draw) < redraw_ms {
+                continue;
+            }
+            last_draw = now;
+
+            let ch = frames[idx % frames.len()];
+            idx = idx.wrapping_add(1);
+
+            let mut err = std::io::stderr();
+            let _ = write!(
+                err,
+                "\r\033[K{ch} pc: running… ({})",
+                shorten_for_status(&cmd_str, 80)
+            );
+            let _ = err.flush();
+            spinner_visible.store(true, Ordering::Relaxed);
+        }
+
+        if spinner_visible.swap(false, Ordering::Relaxed) {
+            let mut err = std::io::stderr();
+            let _ = write!(err, "\r\033[K");
+            let _ = err.flush();
+        }
+    }))
+}
+
+fn shorten_for_status(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    let mut end = 0usize;
+    for (i, _) in s.char_indices() {
+        if i > keep {
+            break;
+        }
+        end = i;
+    }
+    format!("{}...", &s[..end])
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_millis() as u64
+}
+
+fn tee_pipe(
+    reader: &mut dyn std::io::Read,
+    is_stderr: bool,
+    last_activity_ms: &AtomicU64,
+    spinner_visible: &AtomicBool,
+) -> Vec<u8> {
+    let mut buf = [0u8; 8192];
+    let mut captured = Vec::new();
+    let max = 64 * 1024;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        last_activity_ms.store(now_ms(), Ordering::Relaxed);
+        if spinner_visible.swap(false, Ordering::Relaxed) {
+            let mut err = std::io::stderr();
+            let _ = write!(err, "\r\033[K");
+            let _ = err.flush();
+        }
+
+        // Stream output so long-running tools (e.g. `devcontainer up`) don't look hung.
+        if is_stderr {
+            let mut err = std::io::stderr();
+            let _ = err.write_all(&buf[..n]);
+            let _ = err.flush();
+        } else {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&buf[..n]);
+            let _ = out.flush();
+        }
+
+        if captured.len() < max {
+            let remaining = max - captured.len();
+            let take = remaining.min(n);
+            captured.extend_from_slice(&buf[..take]);
+        }
+    }
+    captured
 }
 
 fn short_hash(path: &Path) -> String {
