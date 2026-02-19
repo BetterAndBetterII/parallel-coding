@@ -78,10 +78,37 @@ struct TemplatesArgs {
 enum TemplatesCommands {
     /// Install embedded presets into $HOME/.pc/templates for customization
     Init(TemplatesInitArgs),
+    /// Compose a custom template from selected stacks (writes to $HOME/.pc/templates/<name>/)
+    Compose(TemplatesComposeArgs),
 }
 
 #[derive(Args, Debug)]
 struct TemplatesInitArgs {
+    /// Overwrite existing files
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum StackComponent {
+    Python,
+    Uv,
+    Go,
+    Node,
+    Pnpm,
+    Desktop,
+}
+
+#[derive(Args, Debug)]
+struct TemplatesComposeArgs {
+    /// Template name (directory under $HOME/.pc/templates/)
+    name: String,
+    /// Components to include (can be repeated)
+    #[arg(long = "with", value_enum)]
+    with_components: Vec<StackComponent>,
+    /// Select components interactively (TUI)
+    #[arg(long)]
+    interactive: bool,
     /// Overwrite existing files
     #[arg(long)]
     force: bool,
@@ -172,6 +199,7 @@ fn main() -> Result<()> {
 fn cmd_templates(args: TemplatesArgs) -> Result<()> {
     match args.command {
         TemplatesCommands::Init(a) => cmd_templates_init(a),
+        TemplatesCommands::Compose(a) => cmd_templates_compose(a),
     }
 }
 
@@ -203,6 +231,83 @@ fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
     }
     println!("Edit templates under $HOME/.pc/templates/<preset>/ to customize.");
     println!("Tip: set PC_HOME=/some/dir to override $HOME/.pc.");
+    Ok(())
+}
+
+fn cmd_templates_compose(args: TemplatesComposeArgs) -> Result<()> {
+    let mut spec = templates::StackSpec::default();
+
+    if args.interactive {
+        if !can_prompt() {
+            bail!("--interactive requires a TTY");
+        }
+
+        let items = vec![
+            ("Python", "Python runtime + pip"),
+            ("UV", "uv (Python package manager)"),
+            ("Go", "Go toolchain"),
+            ("Node", "Node.js"),
+            ("pnpm", "pnpm (via corepack, requires Node)"),
+            ("Desktop", "webtop sidecar in compose (profile: desktop)"),
+        ];
+        let labels: Vec<String> = items.iter().map(|(a, b)| format!("{a} - {b}")).collect();
+        let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select components for this template")
+            .items(&labels)
+            .interact()
+            .context("TUI selection failed")?;
+
+        for idx in selection {
+            match idx {
+                0 => spec.python = true,
+                1 => spec.uv = true,
+                2 => spec.go = true,
+                3 => spec.node = true,
+                4 => spec.pnpm = true,
+                5 => spec.desktop = true,
+                _ => {}
+            }
+        }
+    }
+
+    for c in &args.with_components {
+        match c {
+            StackComponent::Python => spec.python = true,
+            StackComponent::Uv => spec.uv = true,
+            StackComponent::Go => spec.go = true,
+            StackComponent::Node => spec.node = true,
+            StackComponent::Pnpm => spec.pnpm = true,
+            StackComponent::Desktop => spec.desktop = true,
+        }
+    }
+
+    spec.normalize();
+
+    let dir = match templates::write_composed_preset(&args.name, spec.clone(), args.force) {
+        Ok(d) => d,
+        Err(e)
+            if !args.force
+                && can_prompt()
+                && e.downcast_ref::<templates::ForceRequired>().is_some() =>
+        {
+            let ok = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Template {} already exists. Overwrite? (equivalent to --force)",
+                    args.name
+                ))
+                .default(false)
+                .interact()
+                .context("Prompt failed")?;
+            if !ok {
+                println!("Cancelled. Left existing template {}", args.name);
+                return Ok(());
+            }
+            templates::write_composed_preset(&args.name, spec, true)?
+        }
+        Err(e) => return Err(e),
+    };
+
+    println!("Wrote composed template into {}", dir.display());
     Ok(())
 }
 
@@ -496,15 +601,27 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
         .any(|(name, _)| devcontainer_dir.join(name).exists());
     let overwrite_all = if force {
         true
-    } else if needs_overwrite && can_prompt() {
-        Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!(
-                "Some files already exist under {}. Overwrite them? (equivalent to --force)",
+    } else if needs_overwrite {
+        if can_prompt() {
+            let ok = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "Some files already exist under {}. Overwrite them? (equivalent to --force)",
+                    devcontainer_dir.display()
+                ))
+                .default(false)
+                .interact()
+                .context("Prompt failed")?;
+            if !ok {
+                println!("Cancelled. Left existing {}", devcontainer_dir.display());
+                return Ok(());
+            }
+            true
+        } else {
+            bail!(
+                "Some files already exist under {}. Use --force to overwrite.",
                 devcontainer_dir.display()
-            ))
-            .default(false)
-            .interact()
-            .context("Prompt failed")?
+            );
+        }
     } else {
         false
     };
@@ -512,7 +629,10 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
     for (name, contents) in files {
         let target = devcontainer_dir.join(&name);
         if target.exists() && !overwrite_all {
-            continue;
+            bail!(
+                "{} already exists. Use --force to overwrite.",
+                target.display()
+            );
         }
         std::fs::write(&target, contents).with_context(|| {
             format!(

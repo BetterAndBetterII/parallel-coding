@@ -39,6 +39,18 @@ pc templates init
 
 会写入：`$HOME/.pc/templates/python-uv/{devcontainer.json,compose.yaml,Dockerfile}`（可用环境变量 `PC_HOME` 覆盖 `$HOME/.pc`）。
 
+你也可以把常见技术栈“自由拼装”成一个新模板（仅生成你选择的部分，避免引入不需要的依赖）：
+
+```bash
+pc templates compose my-stack --interactive
+```
+
+或非交互：
+
+```bash
+pc templates compose my-stack --with python --with uv --with node --with pnpm --with go
+```
+
 ### 1) 初始化当前目录的 devcontainer（如果还没有）
 
 ```bash
