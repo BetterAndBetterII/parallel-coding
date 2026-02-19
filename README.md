@@ -1,5 +1,8 @@
 # pc-cli (`pc`)
 
+[![CI](https://github.com/BetterAndBetterII/parallel-coding/actions/workflows/ci.yml/badge.svg)](https://github.com/BetterAndBetterII/parallel-coding/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/BetterAndBetterII/parallel-coding/branch/main/graph/badge.svg)](https://codecov.io/gh/BetterAndBetterII/parallel-coding)
+
 一个可安装的 Rust CLI，用于在本机用 **git worktree + Dev Container** 管理“并行 Agent/任务环境”，并可选启动每个任务独立的 **webtop 桌面容器**用于浏览器调试。
 
 ## 安装
@@ -145,4 +148,12 @@ CARGO_HOME=/tmp/cargo-home cargo test
 
 ```bash
 PC_E2E=1 CARGO_HOME=/tmp/cargo-home cargo test --test e2e_real -- --ignored --nocapture
+```
+
+覆盖率（需要 `llvm-tools-preview` + `cargo-llvm-cov`）：
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+cargo llvm-cov --locked --all-features --all-targets --workspace --summary-only
 ```
