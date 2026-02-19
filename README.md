@@ -39,6 +39,12 @@ pc templates init
 
 会写入：`$HOME/.pc/templates/python-uv/{devcontainer.json,compose.yaml,Dockerfile}`（可用环境变量 `PC_HOME` 覆盖 `$HOME/.pc`）。
 
+默认会以交互式 TUI 选择要安装的内置模板；如需脚本化（不交互）安装全部内置模板：
+
+```bash
+pc templates init --non-interactive
+```
+
 你也可以把常见技术栈“自由拼装”成一个新模板（仅生成你选择的部分，避免引入不需要的依赖）：
 
 ```bash
@@ -101,7 +107,7 @@ pc agent desktop-on /path/to/worktree
 pc desktop-on /path/to/dir
 ```
 
-### 4) 删除 agent（停止 docker + 删除 worktree + 可选删除分支）
+### 4) 删除 agent（停止 docker + 删除 worktree）
 
 ```bash
 pc agent rm agent-a
@@ -111,3 +117,4 @@ pc agent rm agent-a
 
 - `pc agent rm` **只删除 worktree**，不会删除 `agent/<name>` 分支（如需删除可手动 `git branch -D agent/<name>`）。
 - 如果 worktree 里存在未提交的修改或未追踪文件，`git worktree remove` 可能会提示需要 `--force`；`pc` 会展示 `git status --porcelain` 并让你选择是否重试（默认 `no`）。
+- 模板里的共享缓存卷会标为 `external: true`，并在启动前自动 `docker volume create`（第一次运行会创建，后续复用），避免 Compose “created for project …” 的告警。

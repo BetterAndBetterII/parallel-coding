@@ -95,6 +95,9 @@ struct TemplatesInitArgs {
     /// Overwrite existing files
     #[arg(long)]
     force: bool,
+    /// Do not prompt; install all embedded presets
+    #[arg(long)]
+    non_interactive: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -209,7 +212,34 @@ fn cmd_templates(args: TemplatesArgs) -> Result<()> {
 }
 
 fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
-    for preset in templates::embedded_presets() {
+    let embedded = templates::embedded_presets();
+    let selected: Vec<&str> = if args.non_interactive || !can_prompt() {
+        if !args.non_interactive && !can_prompt() {
+            eprintln!(
+                "No TTY detected; proceeding non-interactively (installing all embedded presets)."
+            );
+        }
+        embedded.to_vec()
+    } else {
+        let items: Vec<String> = embedded.iter().map(|p| p.to_string()).collect();
+        let defaults: Vec<bool> = std::iter::repeat(true).take(items.len()).collect();
+
+        let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select embedded presets to install into $PC_HOME/templates")
+            .items(&items)
+            .defaults(&defaults)
+            .interact()
+            .context("TUI selection failed")?;
+
+        if selection.is_empty() {
+            println!("Cancelled. No presets selected.");
+            return Ok(());
+        }
+
+        selection.into_iter().map(|idx| embedded[idx]).collect()
+    };
+
+    for preset in selected {
         let dir = match templates::install_embedded_preset(preset, args.force) {
             Ok(d) => d,
             Err(e)
@@ -672,6 +702,23 @@ fn devcontainer_up(
     override_config: Option<&Path>,
     env: &[(&str, String)],
 ) -> Result<()> {
+    if is_in_path("docker") {
+        let compose_path = if let Some(cfg) = override_config {
+            cfg.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("compose.yaml")
+        } else {
+            dir.join(".devcontainer").join("compose.yaml")
+        };
+        let cache_prefix = cache_prefix_from_env(env).unwrap_or_else(|| "devcontainer".to_string());
+        if let Err(e) = ensure_external_cache_volumes_exist(&compose_path, &cache_prefix) {
+            eprintln!(
+                "Warning: failed to ensure external cache volumes for {}: {e:#}",
+                compose_path.display()
+            );
+        }
+    }
+
     let mut cmd = Command::new("devcontainer");
     cmd.arg("up").arg("--workspace-folder").arg(dir);
     if let Some(cfg) = override_config {
@@ -682,6 +729,52 @@ fn devcontainer_up(
     }
     run_ok(cmd).context("devcontainer up failed")?;
     Ok(())
+}
+
+fn cache_prefix_from_env(env: &[(&str, String)]) -> Option<String> {
+    env.iter()
+        .find(|(k, _)| *k == "DEVCONTAINER_CACHE_PREFIX")
+        .map(|(_, v)| v.clone())
+}
+
+fn ensure_external_cache_volumes_exist(compose_path: &Path, cache_prefix: &str) -> Result<()> {
+    if !compose_path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(compose_path)
+        .with_context(|| format!("Failed to read {}", compose_path.display()))?;
+
+    // Only create volumes that appear in the compose.yaml.
+    let suffixes = [
+        "uv-cache",
+        "pip-cache",
+        "pnpm-home",
+        "npm-cache",
+        "vscode-extensions",
+        "go-mod-cache",
+        "go-build-cache",
+    ];
+
+    for suffix in suffixes {
+        let needle = format!("-{suffix}");
+        if !text.contains(&needle) {
+            continue;
+        }
+        ensure_docker_volume(&format!("{cache_prefix}-{suffix}"))?;
+    }
+    Ok(())
+}
+
+fn ensure_docker_volume(name: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["volume", "create", name])
+        .status()
+        .context("Failed to run docker volume create")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("docker volume create {name} failed with status: {status}");
+    }
 }
 
 fn devcontainer_up_stealth(

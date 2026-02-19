@@ -167,9 +167,11 @@ fn composed_compose_yaml(spec: &StackSpec) -> String {
         volumes.push("      - uv_cache:/home/vscode/.cache/uv".to_string());
         volumes.push("      - pip_cache:/home/vscode/.cache/pip".to_string());
         volume_defs.push("  uv_cache:".to_string());
+        volume_defs.push("    external: true".to_string());
         volume_defs
             .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-uv-cache".to_string());
         volume_defs.push("  pip_cache:".to_string());
+        volume_defs.push("    external: true".to_string());
         volume_defs
             .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pip-cache".to_string());
     }
@@ -178,9 +180,11 @@ fn composed_compose_yaml(spec: &StackSpec) -> String {
         volumes.push("      - pnpm_home:/home/vscode/.local/share/pnpm".to_string());
         volumes.push("      - npm_cache:/home/vscode/.npm".to_string());
         volume_defs.push("  pnpm_home:".to_string());
+        volume_defs.push("    external: true".to_string());
         volume_defs
             .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pnpm-home".to_string());
         volume_defs.push("  npm_cache:".to_string());
+        volume_defs.push("    external: true".to_string());
         volume_defs
             .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-npm-cache".to_string());
     }
@@ -189,9 +193,11 @@ fn composed_compose_yaml(spec: &StackSpec) -> String {
         volumes.push("      - go_mod_cache:/home/vscode/go/pkg/mod".to_string());
         volumes.push("      - go_build_cache:/home/vscode/.cache/go-build".to_string());
         volume_defs.push("  go_mod_cache:".to_string());
+        volume_defs.push("    external: true".to_string());
         volume_defs
             .push("    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-mod-cache".to_string());
         volume_defs.push("  go_build_cache:".to_string());
+        volume_defs.push("    external: true".to_string());
         volume_defs.push(
             "    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-build-cache".to_string(),
         );

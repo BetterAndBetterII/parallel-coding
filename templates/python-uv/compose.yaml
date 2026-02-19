@@ -38,13 +38,18 @@ services:
 
 volumes:
   uv_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-uv-cache
   pip_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pip-cache
   pnpm_home:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pnpm-home
   npm_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-npm-cache
   vscode_extensions:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-vscode-extensions
   desktop_home: {}
