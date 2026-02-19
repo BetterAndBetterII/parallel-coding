@@ -6,6 +6,8 @@ use clap::{Args, Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 use serde::{Deserialize, Serialize};
 
+use pc_cli::agent_name::{derive_agent_name_from_branch, is_valid_agent_name};
+
 mod templates;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,7 +476,7 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     let agent_name = match args.agent_name {
         Some(v) => {
             if !is_valid_agent_name(&v) {
-                bail!("agent-name must match: [A-Za-z0-9._-]+");
+                bail!("agent-name must match: [A-Za-z0-9._-]+ (and cannot be '.' or '..')");
             }
             v
         }
@@ -712,7 +714,7 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     let agent_name = match args.agent_name {
         Some(v) => {
             if !is_valid_agent_name(&v) {
-                bail!("agent-name must match: [A-Za-z0-9._-]+");
+                bail!("agent-name must match: [A-Za-z0-9._-]+ (and cannot be '.' or '..')");
             }
             v
         }
@@ -870,7 +872,7 @@ fn devcontainer_up(dir: &Path, config: Option<&Path>, env: &[(&str, String)]) ->
     for (k, v) in env {
         cmd.env(k, v);
     }
-    run_ok(cmd).context("devcontainer up failed")?;
+    run_ok_capture_output(cmd).context("devcontainer up failed")?;
     Ok(())
 }
 
@@ -998,7 +1000,8 @@ fn is_in_path(bin: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn require_existing_dir(dir: &Path) -> Result<PathBuf> {
@@ -1020,6 +1023,49 @@ fn run_ok(mut cmd: Command) -> Result<ExitStatus> {
     } else {
         bail!("Command failed with status: {status}");
     }
+}
+
+fn command_string(cmd: &Command) -> String {
+    let prog = cmd.get_program().to_string_lossy();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    if args.is_empty() {
+        prog.to_string()
+    } else {
+        format!("{prog} {}", args.join(" "))
+    }
+}
+
+fn run_ok_capture_output(mut cmd: Command) -> Result<ExitStatus> {
+    let cmd_str = command_string(&cmd);
+    let output = cmd.output().context("Failed to spawn command")?;
+    if output.status.success() {
+        return Ok(output.status);
+    }
+
+    let code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() { stderr } else { stdout };
+    let details = if details.is_empty() {
+        "<no output>".to_string()
+    } else {
+        let max = 8 * 1024;
+        if details.len() > max {
+            format!("{}...(truncated)", &details[..max])
+        } else {
+            details
+        }
+    };
+
+    bail!("{cmd_str} failed (exit {code}): {details}");
 }
 
 fn short_hash(path: &Path) -> String {
@@ -1137,43 +1183,6 @@ fn remove_agent_meta(agent_name: &str) -> Result<()> {
             .with_context(|| format!("Failed to remove {}", path.display()))?;
     }
     Ok(())
-}
-
-fn is_valid_agent_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-}
-
-fn derive_agent_name_from_branch(branch_name: &str) -> Result<String> {
-    if is_valid_agent_name(branch_name) {
-        return Ok(branch_name.to_string());
-    }
-
-    let mut out = String::with_capacity(branch_name.len());
-    let mut prev_underscore = false;
-    for ch in branch_name.chars() {
-        let ok = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
-        let mapped = if ok { ch } else { '_' };
-        if mapped == '_' {
-            if prev_underscore {
-                continue;
-            }
-            prev_underscore = true;
-        } else {
-            prev_underscore = false;
-        }
-        out.push(mapped);
-    }
-
-    let out = out.trim_matches('_').to_string();
-    if out.is_empty() || out == "." || out == ".." {
-        bail!(
-            "Cannot derive a valid agent name from branch name: {branch_name:?}. Use --agent-name."
-        );
-    }
-    Ok(out)
 }
 
 fn git_repo_root() -> Result<PathBuf> {
