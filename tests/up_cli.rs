@@ -15,6 +15,8 @@ mod unix_only {
     #[test]
     fn pc_up_normal_mode_calls_devcontainer_without_config() {
         let td = TempDir::new().unwrap();
+        let pc_home = td.path().join("pc-home");
+        fs::create_dir_all(&pc_home).unwrap();
         let ws = td.path().join("ws");
         fs::create_dir_all(ws.join(".devcontainer")).unwrap();
         fs::write(ws.join(".devcontainer").join("devcontainer.json"), "{}\n").unwrap();
@@ -37,6 +39,7 @@ exit 0
         );
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+            .env("PC_HOME", &pc_home)
             .env("PATH", stub_bin.to_string_lossy().to_string())
             .env("PC_LOG", &log)
             .args(["up", ws.to_str().unwrap()])
@@ -132,6 +135,8 @@ exit 0
     #[test]
     fn pc_up_init_creates_devcontainer_files_then_runs_normal_mode() {
         let td = TempDir::new().unwrap();
+        let pc_home = td.path().join("pc-home");
+        fs::create_dir_all(&pc_home).unwrap();
         let ws = td.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
 
@@ -153,6 +158,7 @@ exit 0
         );
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+            .env("PC_HOME", &pc_home)
             .env("PATH", stub_bin.to_string_lossy().to_string())
             .env("PC_LOG", &log)
             .args(["up", ws.to_str().unwrap(), "--init"])
@@ -170,6 +176,8 @@ exit 0
     #[test]
     fn pc_up_propagates_devcontainer_stderr_and_exit_code() {
         let td = TempDir::new().unwrap();
+        let pc_home = td.path().join("pc-home");
+        fs::create_dir_all(&pc_home).unwrap();
         let ws = td.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
 
@@ -190,6 +198,7 @@ exit 42
         );
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+            .env("PC_HOME", &pc_home)
             .env("PATH", stub_bin.to_string_lossy().to_string())
             .args(["up", ws.to_str().unwrap()])
             .assert()
@@ -201,10 +210,13 @@ exit 42
     #[test]
     fn pc_up_errors_when_devcontainer_missing() {
         let td = TempDir::new().unwrap();
+        let pc_home = td.path().join("pc-home");
+        fs::create_dir_all(&pc_home).unwrap();
         let ws = td.path().join("ws");
         fs::create_dir_all(&ws).unwrap();
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+            .env("PC_HOME", &pc_home)
             .env("PATH", "")
             .args(["up", ws.to_str().unwrap()])
             .assert()

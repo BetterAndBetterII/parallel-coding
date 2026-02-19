@@ -9,7 +9,8 @@ services:
 
 volumes:
   uv_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-uv-cache
   pip_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pip-cache
-

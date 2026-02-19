@@ -1,0 +1,5 @@
+id = "extra/vscode-extensions"
+name = "VS Code Extensions Cache"
+description = "Cache VS Code server extensions under a named Docker volume"
+category = "Extra"
+

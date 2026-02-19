@@ -8,8 +8,8 @@ components = [
   "lang/go",
   "lang/rust",
   "tool/cpp/build-essential",
+  "extra/vscode-extensions",
   "extra/desktop",
   "svc/postgres",
   "svc/redis",
 ]
-
