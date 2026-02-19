@@ -68,12 +68,16 @@ pc init . --preset python-uv
 在任意 git 仓库目录内：
 
 ```bash
-pc agent new agent-a
+pc new feat/tui-templates
+# 或等价写法：
+pc agent new feat/tui-templates
 ```
 
 要求当前仓库至少有 1 个 commit（否则 `git worktree` 会创建 orphan 分支，worktree 为空）。
 
-如果 worktree 里没有 devcontainer 配置（例如没有 `.devcontainer/devcontainer.json`），`pc` 会用 `--preset`（默认 `python-uv`）走 “stealth” 模式：用 `devcontainer up --override-config` 指向 `$HOME/.pc/templates/<preset>/`（没有则用内置模板），不需要把 `.devcontainer/` 写进你的仓库/工作区。
+如果 worktree 里没有 devcontainer 配置（例如没有 `.devcontainer/devcontainer.json`），`pc` 会用 `--preset`（默认 `python-uv`）走 “stealth” 模式：用 `devcontainer up --config` 指向 `$HOME/.pc/runtime/devcontainer-presets/<preset>/.devcontainer/devcontainer.json`（会优先读取 `$HOME/.pc/templates/<preset>/`，没有则用内置模板），不需要把 `.devcontainer/` 写进你的仓库/工作区。
+
+说明：当分支名包含 `/` 等字符时，`pc` 会自动派生出一个合法的 `agent-name` 作为 worktree 目录名与 compose project 名；如需指定可用 `--agent-name <name>`。
 
 默认 worktree 会创建在：`<repo>/../<repo-name>-agents/<agent-name>`，也可用 `--base-dir` 或环境变量 `AGENT_WORKTREE_BASE_DIR` 指定。
 
@@ -110,11 +114,25 @@ pc desktop-on /path/to/dir
 ### 4) 删除 agent（停止 docker + 删除 worktree）
 
 ```bash
-pc agent rm agent-a
+pc agent rm feat/tui-templates
 ```
 
 说明：
 
-- `pc agent rm` **只删除 worktree**，不会删除 `agent/<name>` 分支（如需删除可手动 `git branch -D agent/<name>`）。
+- `pc agent rm` **只删除 worktree**，不会删除对应的 git 分支（如需删除可手动 `git branch -D <branch>`）。
 - 如果 worktree 里存在未提交的修改或未追踪文件，`git worktree remove` 可能会提示需要 `--force`；`pc` 会展示 `git status --porcelain` 并让你选择是否重试（默认 `no`）。
 - 模板里的共享缓存卷会标为 `external: true`，并在启动前自动 `docker volume create`（第一次运行会创建，后续复用），避免 Compose “created for project …” 的告警。
+
+## 测试
+
+普通集成测试（不需要真实 docker/devcontainer）：
+
+```bash
+CARGO_HOME=/tmp/cargo-home cargo test
+```
+
+实机 E2E 测试（需要 `git` + `devcontainer` + `docker` 且 docker daemon 可用，会真的拉镜像/启动容器）：
+
+```bash
+PC_E2E=1 CARGO_HOME=/tmp/cargo-home cargo test --test e2e_real -- --ignored --nocapture
+```

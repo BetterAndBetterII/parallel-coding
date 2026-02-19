@@ -13,6 +13,8 @@ struct AgentMeta {
     preset: String,
     compose_project: String,
     cache_prefix: String,
+    #[serde(default)]
+    branch_name: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -32,6 +34,8 @@ enum Commands {
     Init(InitArgs),
     /// Bring up a Dev Container from any directory
     Up(UpArgs),
+    /// Create git worktree + branch and (optionally) boot devcontainer (alias of `pc agent new`)
+    New(AgentNewArgs),
     /// Start the optional desktop (webtop) sidecar for a directory
     DesktopOn(DesktopOnArgs),
     /// Manage devcontainer templates under $HOME/.pc/templates
@@ -143,8 +147,11 @@ enum AgentCommands {
 
 #[derive(Args, Debug)]
 struct AgentNewArgs {
-    /// Agent name (used in branch name and compose project name)
-    agent_name: String,
+    /// Branch name to create/use (can include `/`, e.g. `feat/tui-templates`)
+    branch_name: String,
+    /// Override the derived agent name (used for worktree directory, compose project, and metadata)
+    #[arg(long = "agent-name")]
+    agent_name: Option<String>,
     /// Base branch/ref for the new worktree branch (default: current HEAD)
     #[arg(long)]
     base: Option<String>,
@@ -179,8 +186,11 @@ struct AgentDesktopOnArgs {
 
 #[derive(Args, Debug)]
 struct AgentRmArgs {
-    /// Agent name (used in branch name and default worktree path)
-    agent_name: String,
+    /// Branch name (or agent name) to remove
+    branch_name: String,
+    /// Override the derived agent name (used for default worktree path and metadata lookup)
+    #[arg(long = "agent-name")]
+    agent_name: Option<String>,
     /// Base directory to place worktrees (for locating existing worktree dir)
     #[arg(long)]
     base_dir: Option<PathBuf>,
@@ -194,6 +204,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init(args) => cmd_init(args),
         Commands::Up(args) => cmd_up(args),
+        Commands::New(args) => cmd_agent_new(args),
         Commands::DesktopOn(args) => cmd_desktop_on(args.dir),
         Commands::Templates(args) => cmd_templates(args),
         Commands::Agent(args) => match args.command {
@@ -425,10 +436,6 @@ fn cmd_desktop_on(dir: PathBuf) -> Result<()> {
 }
 
 fn cmd_agent_new(args: AgentNewArgs) -> Result<()> {
-    if !is_valid_agent_name(&args.agent_name) {
-        bail!("agent-name must match: [A-Za-z0-9._-]+");
-    }
-
     ensure_in_path("git")?;
 
     if !git_has_commit()? {
@@ -461,13 +468,28 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     std::fs::create_dir_all(&worktree_base_dir)
         .with_context(|| format!("Failed to create base dir: {}", worktree_base_dir.display()))?;
 
-    let worktree_dir = worktree_base_dir.join(&args.agent_name);
-    if worktree_dir.exists() {
-        bail!("Worktree path already exists: {}", worktree_dir.display());
+    let branch_name = args.branch_name.clone();
+    ensure_git_branch_name_valid(&branch_name)?;
+
+    let agent_name = match args.agent_name {
+        Some(v) => {
+            if !is_valid_agent_name(&v) {
+                bail!("agent-name must match: [A-Za-z0-9._-]+");
+            }
+            v
+        }
+        None => derive_agent_name_from_branch(&branch_name)?,
+    };
+
+    let worktree_dir_raw = worktree_base_dir.join(&agent_name);
+    if worktree_dir_raw.exists() {
+        bail!(
+            "Worktree path already exists: {}",
+            worktree_dir_raw.display()
+        );
     }
 
-    let branch_name = args.agent_name.clone();
-    if let Some(existing) = git_worktree_path_for_basename(&args.agent_name)? {
+    if let Some(existing) = git_worktree_path_for_basename(&agent_name)? {
         bail!(
             "A worktree directory with the same name already exists: {}",
             existing.display()
@@ -492,31 +514,72 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     };
 
     ensure_git_ref_exists(&base_ref)?;
-    git_worktree_add(&worktree_dir, &branch_name, &base_ref)?;
-    let worktree_dir = std::fs::canonicalize(&worktree_dir)
-        .with_context(|| format!("Failed to resolve worktree dir: {}", worktree_dir.display()))?;
-
-    let compose_project = format!("agent_{}", sanitize_compose(&args.agent_name));
+    let compose_project = format!("agent_{}", sanitize_compose(&agent_name));
     let cache_prefix = sanitize_compose(&repo_name);
+    let meta = AgentMeta {
+        preset: args.preset.clone(),
+        compose_project: compose_project.clone(),
+        cache_prefix: cache_prefix.clone(),
+        branch_name: Some(branch_name.clone()),
+    };
 
+    let created_branch = git_worktree_add(&worktree_dir_raw, &branch_name, &base_ref)?;
+    let worktree_dir = match std::fs::canonicalize(&worktree_dir_raw) {
+        Ok(p) => p,
+        Err(e) => {
+            rollback_failed_agent_new(
+                &repo_root,
+                &agent_name,
+                &worktree_dir_raw,
+                &branch_name,
+                created_branch,
+                &meta,
+            )?;
+            return Err(anyhow::Error::new(e).context(format!(
+                "Failed to resolve worktree dir: {}",
+                worktree_dir_raw.display()
+            )));
+        }
+    };
+
+    if agent_name != branch_name {
+        println!("Agent:    {agent_name}");
+    }
     println!("Worktree: {}", worktree_dir.display());
     println!("Branch:   {branch_name}");
     println!("Compose:  {compose_project}");
 
-    write_agent_meta(
-        &args.agent_name,
-        AgentMeta {
-            preset: args.preset.clone(),
-            compose_project: compose_project.clone(),
-            cache_prefix: cache_prefix.clone(),
-        },
-    )?;
-
     if args.no_up {
+        if let Err(e) = write_agent_meta(&agent_name, meta) {
+            rollback_failed_agent_new(
+                &repo_root,
+                &agent_name,
+                &worktree_dir,
+                &branch_name,
+                created_branch,
+                &AgentMeta {
+                    preset: args.preset.clone(),
+                    compose_project,
+                    cache_prefix,
+                    branch_name: Some(branch_name.clone()),
+                },
+            )?;
+            return Err(e);
+        }
         return Ok(());
     }
 
-    ensure_in_path("devcontainer")?;
+    if let Err(e) = ensure_in_path("devcontainer") {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &meta,
+        )?;
+        return Err(e);
+    }
     let mut env = vec![
         ("COMPOSE_PROJECT_NAME", compose_project.clone()),
         ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.clone()),
@@ -525,8 +588,8 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
 
-    if workspace_has_devcontainer_config(&worktree_dir) {
-        devcontainer_up(&worktree_dir, None, &env)?;
+    let up_result = if workspace_has_devcontainer_config(&worktree_dir) {
+        devcontainer_up(&worktree_dir, None, &env)
     } else {
         devcontainer_up_stealth(
             &worktree_dir,
@@ -535,7 +598,37 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
             &compose_project,
             &cache_prefix,
             args.desktop,
+        )
+        .map(|_| ())
+    };
+
+    if let Err(e) = up_result {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &meta,
         )?;
+        return Err(e);
+    }
+
+    if let Err(e) = write_agent_meta(&agent_name, meta) {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &AgentMeta {
+                preset: args.preset.clone(),
+                compose_project,
+                cache_prefix,
+                branch_name: Some(branch_name.clone()),
+            },
+        )?;
+        return Err(e);
     }
 
     if !args.no_open && is_in_path("code") {
@@ -548,10 +641,51 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     Ok(())
 }
 
-fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
-    if !is_valid_agent_name(&args.agent_name) {
-        bail!("agent-name must match: [A-Za-z0-9._-]+");
+fn rollback_failed_agent_new(
+    repo_root: &Path,
+    agent_name: &str,
+    worktree_dir: &Path,
+    branch_name: &str,
+    created_branch: bool,
+    meta: &AgentMeta,
+) -> Result<()> {
+    // Best-effort rollback: treat "agent new" like a transaction.
+    if let Err(e) = docker_compose_down_if_present(worktree_dir) {
+        eprintln!(
+            "Warning: docker compose down failed during rollback for {}: {e:#}",
+            worktree_dir.display()
+        );
     }
+    if let Err(e) = docker_compose_down_stealth(worktree_dir, meta) {
+        eprintln!(
+            "Warning: docker compose down (stealth) failed during rollback for {}: {e:#}",
+            worktree_dir.display()
+        );
+    }
+    if let Err(e) = git_worktree_remove(worktree_dir, true) {
+        eprintln!(
+            "Warning: git worktree remove --force failed during rollback for {}: {e:#}",
+            worktree_dir.display()
+        );
+    }
+    if created_branch {
+        if let Err(e) = git_branch_delete_force(repo_root, branch_name) {
+            eprintln!(
+                "Warning: git branch -D failed during rollback for {}: {e:#}",
+                branch_name
+            );
+        }
+    }
+    if let Err(e) = remove_agent_meta(agent_name) {
+        eprintln!(
+            "Warning: failed to remove agent metadata during rollback for {}: {e:#}",
+            agent_name
+        );
+    }
+    Ok(())
+}
+
+fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     ensure_in_path("git")?;
 
     let repo_root = git_repo_root()?;
@@ -572,8 +706,20 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
         parent.join(format!("{repo_name}-agents"))
     };
 
-    let expected_dir = worktree_base_dir.join(&args.agent_name);
-    let branch_name = args.agent_name.clone();
+    let branch_name = args.branch_name.clone();
+    ensure_git_branch_name_valid(&branch_name)?;
+
+    let agent_name = match args.agent_name {
+        Some(v) => {
+            if !is_valid_agent_name(&v) {
+                bail!("agent-name must match: [A-Za-z0-9._-]+");
+            }
+            v
+        }
+        None => derive_agent_name_from_branch(&branch_name)?,
+    };
+
+    let expected_dir = worktree_base_dir.join(&agent_name);
 
     let worktree_dir = if expected_dir.exists() {
         expected_dir
@@ -600,10 +746,11 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     ensure_git_exclude(&worktree_dir, ".pytest_cache/")?;
     ensure_git_exclude(&worktree_dir, ".ruff_cache/")?;
 
-    let meta = read_agent_meta(&args.agent_name)?.unwrap_or_else(|| AgentMeta {
+    let meta = read_agent_meta(&agent_name)?.unwrap_or_else(|| AgentMeta {
         preset: "python-uv".to_string(),
-        compose_project: format!("agent_{}", sanitize_compose(&args.agent_name)),
+        compose_project: format!("agent_{}", sanitize_compose(&agent_name)),
         cache_prefix: sanitize_compose(&repo_name),
+        branch_name: Some(branch_name.clone()),
     });
 
     if let Err(e) = docker_compose_down_if_present(&worktree_dir) {
@@ -635,9 +782,9 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     // Do not delete the agent branch by default; removing the worktree is enough.
     // Users can delete the branch manually if desired.
 
-    remove_agent_meta(&args.agent_name)?;
+    remove_agent_meta(&agent_name)?;
 
-    println!("Removed agent {}", args.agent_name);
+    println!("Removed agent {agent_name}");
     Ok(())
 }
 
@@ -699,11 +846,11 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
 
 fn devcontainer_up(
     dir: &Path,
-    override_config: Option<&Path>,
+    config: Option<&Path>,
     env: &[(&str, String)],
 ) -> Result<()> {
     if is_in_path("docker") {
-        let compose_path = if let Some(cfg) = override_config {
+        let compose_path = if let Some(cfg) = config {
             cfg.parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join("compose.yaml")
@@ -721,8 +868,8 @@ fn devcontainer_up(
 
     let mut cmd = Command::new("devcontainer");
     cmd.arg("up").arg("--workspace-folder").arg(dir);
-    if let Some(cfg) = override_config {
-        cmd.arg("--override-config").arg(cfg);
+    if let Some(cfg) = config {
+        cmd.arg("--config").arg(cfg);
     }
     for (k, v) in env {
         cmd.env(k, v);
@@ -1006,6 +1153,36 @@ fn is_valid_agent_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
+fn derive_agent_name_from_branch(branch_name: &str) -> Result<String> {
+    if is_valid_agent_name(branch_name) {
+        return Ok(branch_name.to_string());
+    }
+
+    let mut out = String::with_capacity(branch_name.len());
+    let mut prev_underscore = false;
+    for ch in branch_name.chars() {
+        let ok = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
+        let mapped = if ok { ch } else { '_' };
+        if mapped == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        out.push(mapped);
+    }
+
+    let out = out.trim_matches('_').to_string();
+    if out.is_empty() || out == "." || out == ".." {
+        bail!(
+            "Cannot derive a valid agent name from branch name: {branch_name:?}. Use --agent-name."
+        );
+    }
+    Ok(out)
+}
+
 fn git_repo_root() -> Result<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -1046,7 +1223,21 @@ fn ensure_git_ref_exists(name: &str) -> Result<()> {
     }
 }
 
-fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<()> {
+fn ensure_git_branch_name_valid(name: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["check-ref-format", "--branch", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run git check-ref-format --branch")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("Invalid branch name: {name}");
+    }
+}
+
+fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<bool> {
     let ref_name = format!("refs/heads/{branch_name}");
     let branch_exists = Command::new("git")
         .args(["show-ref", "--verify", "--quiet", &ref_name])
@@ -1066,7 +1257,7 @@ fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> R
             .arg(base_ref);
     }
     run_ok(cmd).context("git worktree add failed")?;
-    Ok(())
+    Ok(!branch_exists)
 }
 
 fn git_worktree_remove(path: &Path, force: bool) -> Result<bool> {
@@ -1139,6 +1330,29 @@ fn git_status_porcelain(worktree_dir: &Path) -> Result<String> {
         bail!("git status failed");
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_branch_delete_force(repo_root: &Path, branch_name: &str) -> Result<()> {
+    let ref_name = format!("refs/heads/{branch_name}");
+    let exists = Command::new("git")
+        .current_dir(repo_root)
+        .args(["show-ref", "--verify", "--quiet", &ref_name])
+        .status()
+        .context("Failed to run git show-ref --verify")?;
+    if !exists.success() {
+        return Ok(());
+    }
+
+    let status = Command::new("git")
+        .current_dir(repo_root)
+        .args(["branch", "-D", branch_name])
+        .status()
+        .context("Failed to run git branch -D")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("git branch -D {branch_name} failed with status: {status}");
+    }
 }
 
 fn git_worktree_path_for_branch(branch_name: &str) -> Result<Option<PathBuf>> {
