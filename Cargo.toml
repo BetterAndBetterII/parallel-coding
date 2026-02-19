@@ -1,0 +1,15 @@
+[package]
+name = "pc-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.74.1"
+
+[dependencies]
+anyhow = "1.0.86"
+clap = { version = "4.5.31", features = ["derive"] }
+sha1 = "0.10.6"
+
+[[bin]]
+name = "pc"
+path = "src/main.rs"
