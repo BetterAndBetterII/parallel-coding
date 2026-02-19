@@ -10,7 +10,8 @@ services:
 
 volumes:
   pnpm_home:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pnpm-home
   npm_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-npm-cache
-

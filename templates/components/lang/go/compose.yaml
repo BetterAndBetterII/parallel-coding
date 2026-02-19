@@ -9,7 +9,8 @@ services:
 
 volumes:
   go_mod_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-mod-cache
   go_build_cache:
+    external: true
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-go-build-cache
-

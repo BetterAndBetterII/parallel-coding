@@ -462,7 +462,19 @@ fn render_dockerfile(parts: &[(String, String)]) -> Result<String> {
     }
 
     let mut out = String::new();
-    for (id, part) in parts {
+    // Keep the first Dockerfile part at the top so the final Dockerfile starts with `FROM ...`,
+    // matching common expectations and existing tests.
+    let mut iter = parts.iter();
+    if let Some((first_id, first_part)) = iter.next() {
+        out.push_str(first_part);
+        if !first_part.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str(&format!("# pc:component {first_id} end\n\n"));
+    }
+
+    for (id, part) in iter {
         out.push_str(&format!("# pc:component {id} begin\n"));
         out.push_str(part);
         if !part.ends_with('\n') {
@@ -808,6 +820,7 @@ fn make_compose_stealth(compose: &str, default_image: &str) -> Result<String> {
 pub fn preset_files(preset: &str) -> Result<Vec<TemplateFile>> {
     if let Some(dir) = user_templates_dir(preset) {
         if dir.is_dir() {
+            ensure_fs_template_dir_complete(&dir)?;
             return read_fs_template_dir(&dir);
         }
     }
@@ -831,6 +844,17 @@ pub fn preset_files(preset: &str) -> Result<Vec<TemplateFile>> {
     }
 
     bail!("Unknown preset/profile: {preset}")
+}
+
+fn ensure_fs_template_dir_complete(dir: &Path) -> Result<()> {
+    for name in ["devcontainer.json", "compose.yaml", "Dockerfile"] {
+        let path = dir.join(name);
+        // Use read_to_string to preserve legacy error wording ("Failed to read ...") which
+        // callers/tests rely on for incomplete $PC_HOME overrides.
+        let _ = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn read_fs_template_dir(dir: &Path) -> Result<Vec<TemplateFile>> {
@@ -922,9 +946,11 @@ pub fn install_embedded_preset(preset: &str, force: bool) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
 
     if let Some(embedded) = EMBEDDED_TEMPLATES_DIR.get_dir(preset) {
-        let files = read_embedded_template_dir(embedded)?;
-        write_template_dir(&dir, &files, force)?;
-        return Ok(dir);
+        if embedded.get_file("devcontainer.json").is_some() {
+            let files = read_embedded_template_dir(embedded)?;
+            write_template_dir(&dir, &files, force)?;
+            return Ok(dir);
+        }
     }
 
     if let Some(profile) = read_profile_from_embedded(preset)? {

@@ -7,10 +7,13 @@ use tempfile::TempDir;
 #[test]
 fn pc_init_writes_devcontainer_from_embedded_preset() {
     let td = TempDir::new().unwrap();
+    let pc_home = td.path().join("pc-home");
+    fs::create_dir_all(&pc_home).unwrap();
     let dir = td.path().join("ws");
     fs::create_dir_all(&dir).unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .env("PC_HOME", &pc_home)
         .args(["init", dir.to_str().unwrap(), "--preset", "python-uv"])
         .assert()
         .success();
@@ -27,14 +30,18 @@ fn pc_init_writes_devcontainer_from_embedded_preset() {
 #[test]
 fn pc_init_is_not_idempotent_without_force_in_non_tty() {
     let td = TempDir::new().unwrap();
+    let pc_home = td.path().join("pc-home");
+    fs::create_dir_all(&pc_home).unwrap();
     let dir = td.path().join("ws");
     fs::create_dir_all(&dir).unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("pc"));
+    cmd.env("PC_HOME", &pc_home);
     cmd.args(["init", dir.to_str().unwrap(), "--preset", "python-uv"]);
     cmd.assert().success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .env("PC_HOME", &pc_home)
         .args(["init", dir.to_str().unwrap(), "--preset", "python-uv"])
         .assert()
         .failure()
@@ -44,6 +51,8 @@ fn pc_init_is_not_idempotent_without_force_in_non_tty() {
 #[test]
 fn pc_init_force_overwrites_existing_files() {
     let td = TempDir::new().unwrap();
+    let pc_home = td.path().join("pc-home");
+    fs::create_dir_all(&pc_home).unwrap();
     let dir = td.path().join("ws");
     fs::create_dir_all(dir.join(".devcontainer")).unwrap();
     fs::write(
@@ -53,6 +62,7 @@ fn pc_init_force_overwrites_existing_files() {
     .unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .env("PC_HOME", &pc_home)
         .args([
             "init",
             dir.to_str().unwrap(),
@@ -101,10 +111,13 @@ fn pc_init_prefers_pc_home_template_override() {
 #[test]
 fn pc_init_errors_on_unknown_preset() {
     let td = TempDir::new().unwrap();
+    let pc_home = td.path().join("pc-home");
+    fs::create_dir_all(&pc_home).unwrap();
     let dir = td.path().join("ws");
     fs::create_dir_all(&dir).unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .env("PC_HOME", &pc_home)
         .args(["init", dir.to_str().unwrap(), "--preset", "__no_such__"])
         .assert()
         .failure()

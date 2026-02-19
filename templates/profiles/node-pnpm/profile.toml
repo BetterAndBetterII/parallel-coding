@@ -3,6 +3,6 @@ components = [
   "base/devcontainer",
   "lang/node",
   "tool/node/pnpm",
+  "extra/vscode-extensions",
   "extra/desktop",
 ]
-

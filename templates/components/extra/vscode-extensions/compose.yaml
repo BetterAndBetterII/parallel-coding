@@ -1,0 +1,10 @@
+services:
+  dev:
+    volumes:
+      - vscode_extensions:/home/vscode/.vscode-server/extensions
+
+volumes:
+  vscode_extensions:
+    external: true
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-vscode-extensions
+
