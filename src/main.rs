@@ -698,12 +698,20 @@ fn devcontainer_up_stealth(
     let dc_dir = templates::ensure_runtime_preset_stealth(preset, force_runtime)?;
     let dc_json = dc_dir.join("devcontainer.json");
 
+    let image = devcontainer_image_tag_for_dir(&dc_dir)?;
+    if let Some(img) = &image {
+        ensure_docker_image_built(&dc_dir, img)?;
+    }
+
     let mut env = vec![
         ("PC_WORKSPACE_DIR", abs.to_string_lossy().to_string()),
         ("PC_DEVCONTAINER_DIR", dc_dir.to_string_lossy().to_string()),
         ("COMPOSE_PROJECT_NAME", compose_project.to_string()),
         ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.to_string()),
     ];
+    if let Some(img) = image {
+        env.push(("DEVCONTAINER_IMAGE", img));
+    }
     if desktop {
         env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
@@ -778,9 +786,9 @@ fn short_hash(path: &Path) -> String {
     hex.chars().take(8).collect()
 }
 
-fn default_devcontainer_image_for_dir(dir: &Path) -> Result<Option<String>> {
+fn devcontainer_image_tag_for_dir(dc_dir: &Path) -> Result<Option<String>> {
     use sha1::{Digest, Sha1};
-    let dockerfile = dir.join(".devcontainer").join("Dockerfile");
+    let dockerfile = dc_dir.join("Dockerfile");
     if !dockerfile.exists() {
         return Ok(None);
     }
@@ -789,83 +797,36 @@ fn default_devcontainer_image_for_dir(dir: &Path) -> Result<Option<String>> {
     let mut hasher = Sha1::new();
     hasher.update(&bytes);
     let hex = format!("{:x}", hasher.finalize());
-    Ok(Some(format!("pc-devcontainer:{}", hex.chars().take(12).collect::<String>())))
+    Ok(Some(format!(
+        "pc-devcontainer:{}",
+        hex.chars().take(12).collect::<String>()
+    )))
 }
 
-fn ensure_env_has_devcontainer_image(dir: &Path) -> Result<Option<String>> {
-    let image = default_devcontainer_image_for_dir(dir)?;
-    let Some(image) = image else {
-        return Ok(None);
-    };
-
-    let env_file = dir.join(".devcontainer").join(".env");
-    if !env_file.exists() {
-        return Ok(Some(image));
-    }
-
-    let contents =
-        std::fs::read_to_string(&env_file).with_context(|| format!("Failed to read {}", env_file.display()))?;
-    if contents.lines().any(|l| l.trim_start().starts_with("DEVCONTAINER_IMAGE=")) {
-        return Ok(Some(image));
-    }
-
-    let mut new_contents = contents;
-    if !new_contents.ends_with('\n') {
-        new_contents.push('\n');
-    }
-    new_contents.push_str(&format!("DEVCONTAINER_IMAGE={image}\n"));
-    std::fs::write(&env_file, new_contents)
-        .with_context(|| format!("Failed to write {}", env_file.display()))?;
-    Ok(Some(image))
-}
-
-fn maybe_prebuild_devcontainer_image(dir: &Path) -> Result<()> {
-    let dc_dir = dir.join(".devcontainer");
-    let compose = dc_dir.join("compose.yaml");
-    if !compose.exists() {
+fn ensure_docker_image_built(dc_dir: &Path, image: &str) -> Result<()> {
+    if !is_in_path("docker") {
         return Ok(());
     }
 
-    let compose_contents = std::fs::read_to_string(&compose)
-        .with_context(|| format!("Failed to read {}", compose.display()))?;
-
-    // If the service has a build section, let devcontainer/docker compose handle it.
-    // We only prebuild when the compose references a DEVCONTAINER_IMAGE.
-    if compose_contents.contains("  dev:\n    build:") {
+    let exists = Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run docker image inspect")?
+        .success();
+    if exists {
         return Ok(());
     }
-    if !compose_contents.contains("DEVCONTAINER_IMAGE") {
-        return Ok(());
+
+    let status = Command::new("docker")
+        .current_dir(dc_dir)
+        .args(["build", "-f", "Dockerfile", "-t", image, "."])
+        .status()
+        .context("Failed to run docker build")?;
+    if !status.success() {
+        bail!("docker build failed with status: {status}");
     }
-
-    let image = ensure_env_has_devcontainer_image(dir)?;
-    let Some(image) = image else {
-        return Ok(());
-    };
-
-    // If the image exists locally, nothing to do.
-    if is_in_path("docker") {
-        let exists = Command::new("docker")
-            .args(["image", "inspect", &image])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .context("Failed to run docker image inspect")?
-            .success();
-        if exists {
-            return Ok(());
-        }
-
-        let status = Command::new("docker")
-            .current_dir(&dc_dir)
-            .args(["build", "-f", "Dockerfile", "-t", &image, "."])
-            .status()
-            .context("Failed to run docker build")?;
-        if !status.success() {
-            bail!("docker build failed with status: {status}");
-        }
-    }
-
     Ok(())
 }
 

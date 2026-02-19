@@ -279,15 +279,61 @@ fn read_preset_file(dir: &Path, filename: &str) -> Result<String> {
     std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))
 }
 
-fn make_compose_stealth(compose: &str) -> Result<String> {
+fn sanitize_image_tag(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_').to_string();
+    if out.is_empty() {
+        "default".to_string()
+    } else {
+        out
+    }
+}
+
+fn make_compose_stealth(compose: &str, default_image: &str) -> Result<String> {
     let already_mounts_devcontainer = compose.contains("/workspaces/workspace/.devcontainer");
     let mut saw_workspace_mount = false;
     let mut inserted_devcontainer_mount = false;
+
+    let default_image = sanitize_image_tag(default_image);
+    let image_line = format!("    image: ${{DEVCONTAINER_IMAGE:-pc-devcontainer:{default_image}}}");
+
+    let mut in_dev_service = false;
+    let mut skipping_build_block = false;
+    let mut inserted_image = false;
 
     let mut out = Vec::new();
     for line in compose.lines() {
         let trimmed = line.trim_start();
         let indent_len = line.len() - trimmed.len();
+
+        if indent_len == 2 && trimmed == "dev:" {
+            in_dev_service = true;
+        } else if indent_len == 2 && trimmed.ends_with(':') && trimmed != "dev:" {
+            in_dev_service = false;
+        }
+
+        if in_dev_service && skipping_build_block {
+            if indent_len > 4 {
+                continue;
+            }
+            skipping_build_block = false;
+        }
+
+        if in_dev_service && indent_len == 4 && trimmed == "build:" {
+            out.push(image_line.clone());
+            inserted_image = true;
+            skipping_build_block = true;
+            continue;
+        }
+
         if trimmed.starts_with("- ") && trimmed.contains(":/workspaces/workspace") {
             let item = &trimmed[2..];
             if let Some(idx) = item.find(":/workspaces/workspace") {
@@ -409,7 +455,7 @@ pub fn ensure_runtime_preset_stealth(preset: &str, force: bool) -> Result<PathBu
         }
 
         let contents = if name == "compose.yaml" {
-            make_compose_stealth(&contents)?
+            make_compose_stealth(&contents, preset)?
         } else {
             contents
         };
