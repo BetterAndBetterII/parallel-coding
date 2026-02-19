@@ -26,7 +26,7 @@ mod unix_only {
     fn git_path(repo: &Path, rel: &str) -> String {
         let out = StdCommand::new("git")
             .current_dir(repo)
-            .args(["rev-parse", "--git-path", rel])
+            .args(["rev-parse", "--path-format=absolute", "--git-path", rel])
             .output()
             .expect("spawn git rev-parse --git-path");
         assert!(out.status.success());

@@ -69,7 +69,7 @@ mod unix_only {
         let rel = format!("pc/agents/{agent_name}.json");
         let output = StdCommand::new("git")
             .current_dir(repo)
-            .args(["rev-parse", "--git-path", &rel])
+            .args(["rev-parse", "--path-format=absolute", "--git-path", &rel])
             .output()
             .expect("spawn git rev-parse");
         assert!(output.status.success(), "git rev-parse --git-path failed");
