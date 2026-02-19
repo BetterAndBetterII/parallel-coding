@@ -669,13 +669,13 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
 
 fn devcontainer_up(
     dir: &Path,
-    override_config: Option<&Path>,
+    config: Option<&Path>,
     env: &[(&str, String)],
 ) -> Result<()> {
     let mut cmd = Command::new("devcontainer");
     cmd.arg("up").arg("--workspace-folder").arg(dir);
-    if let Some(cfg) = override_config {
-        cmd.arg("--override-config").arg(cfg);
+    if let Some(cfg) = config {
+        cmd.arg("--config").arg(cfg);
     }
     for (k, v) in env {
         cmd.env(k, v);
