@@ -200,3 +200,100 @@ fn agent_new_should_refuse_when_worktree_exists() {
         .assert()
         .failure();
 }
+
+fn parse_worktree_from_stdout(stdout: &[u8]) -> std::path::PathBuf {
+    let s = String::from_utf8_lossy(stdout);
+    let line = s
+        .lines()
+        .find(|l| l.starts_with("Worktree: "))
+        .unwrap_or_else(|| panic!("missing Worktree line in stdout:\n{s}"));
+    std::path::PathBuf::from(line.trim_start_matches("Worktree: ").trim())
+}
+
+#[test]
+fn agent_new_accepts_branch_names_with_slash() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    init_repo(&repo);
+
+    let agents = td.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .current_dir(&repo)
+        .args([
+            "agent",
+            "new",
+            "feat/tui-templates",
+            "--no-up",
+            "--no-open",
+            "--base-dir",
+            agents.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "pc agent new failed: stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let worktree = parse_worktree_from_stdout(&output.stdout);
+    assert!(worktree.exists(), "worktree dir should exist");
+    assert!(
+        worktree.starts_with(&agents),
+        "worktree should be under base-dir"
+    );
+
+    let status = StdCommand::new("git")
+        .current_dir(&repo)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/feat/tui-templates",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "branch should exist");
+}
+
+#[test]
+fn top_level_new_is_alias_of_agent_new() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    init_repo(&repo);
+
+    let agents = td.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .current_dir(&repo)
+        .args([
+            "new",
+            "feat/pc-new",
+            "--no-up",
+            "--no-open",
+            "--base-dir",
+            agents.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "pc new failed: stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let worktree = parse_worktree_from_stdout(&output.stdout);
+    assert!(worktree.exists(), "worktree dir should exist");
+
+    let status = StdCommand::new("git")
+        .current_dir(&repo)
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feat/pc-new"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "branch should exist");
+}

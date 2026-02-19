@@ -6,6 +6,8 @@ use clap::{Args, Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
 use serde::{Deserialize, Serialize};
 
+use pc_cli::agent_name::{derive_agent_name_from_branch, is_valid_agent_name};
+
 mod templates;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +15,8 @@ struct AgentMeta {
     preset: String,
     compose_project: String,
     cache_prefix: String,
+    #[serde(default)]
+    branch_name: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -32,6 +36,8 @@ enum Commands {
     Init(InitArgs),
     /// Bring up a Dev Container from any directory
     Up(UpArgs),
+    /// Create git worktree + branch and (optionally) boot devcontainer (alias of `pc agent new`)
+    New(AgentNewArgs),
     /// Start the optional desktop (webtop) sidecar for a directory
     DesktopOn(DesktopOnArgs),
     /// Manage devcontainer templates under $HOME/.pc/templates
@@ -97,6 +103,9 @@ struct TemplatesInitArgs {
     /// Overwrite existing files
     #[arg(long)]
     force: bool,
+    /// Do not prompt; install all embedded presets
+    #[arg(long)]
+    non_interactive: bool,
 }
 
 #[derive(Args, Debug)]
@@ -135,8 +144,11 @@ enum AgentCommands {
 
 #[derive(Args, Debug)]
 struct AgentNewArgs {
-    /// Agent name (used in branch name and compose project name)
-    agent_name: String,
+    /// Branch name to create/use (can include `/`, e.g. `feat/tui-templates`)
+    branch_name: String,
+    /// Override the derived agent name (used for worktree directory, compose project, and metadata)
+    #[arg(long = "agent-name")]
+    agent_name: Option<String>,
     /// Base branch/ref for the new worktree branch (default: current HEAD)
     #[arg(long)]
     base: Option<String>,
@@ -171,8 +183,11 @@ struct AgentDesktopOnArgs {
 
 #[derive(Args, Debug)]
 struct AgentRmArgs {
-    /// Agent name (used in branch name and default worktree path)
-    agent_name: String,
+    /// Branch name (or agent name) to remove
+    branch_name: String,
+    /// Override the derived agent name (used for default worktree path and metadata lookup)
+    #[arg(long = "agent-name")]
+    agent_name: Option<String>,
     /// Base directory to place worktrees (for locating existing worktree dir)
     #[arg(long)]
     base_dir: Option<PathBuf>,
@@ -186,6 +201,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init(args) => cmd_init(args),
         Commands::Up(args) => cmd_up(args),
+        Commands::New(args) => cmd_agent_new(args),
         Commands::DesktopOn(args) => cmd_desktop_on(args.dir),
         Commands::Templates(args) => cmd_templates(args),
         Commands::Agent(args) => match args.command {
@@ -205,7 +221,51 @@ fn cmd_templates(args: TemplatesArgs) -> Result<()> {
 }
 
 fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
-    for preset in templates::embedded_presets() {
+    let embedded_presets = templates::embedded_presets();
+    let embedded_profiles = templates::embedded_profile_names();
+
+    let selected_presets: Vec<String> = if embedded_presets.is_empty() {
+        Vec::new()
+    } else if args.non_interactive || !can_prompt() {
+        if !args.non_interactive && !can_prompt() {
+            eprintln!(
+                "No TTY detected; proceeding non-interactively (installing all embedded presets)."
+            );
+        }
+        embedded_presets.clone()
+    } else {
+        let defaults: Vec<bool> = std::iter::repeat_n(true, embedded_presets.len()).collect();
+        let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select embedded presets to render into $PC_HOME/templates")
+            .items(&embedded_presets)
+            .defaults(&defaults)
+            .interact()
+            .context("TUI selection failed")?;
+        selection
+            .into_iter()
+            .map(|idx| embedded_presets[idx].clone())
+            .collect()
+    };
+
+    let selected_profiles: Vec<String> = if embedded_profiles.is_empty() {
+        Vec::new()
+    } else if args.non_interactive || !can_prompt() {
+        embedded_profiles.clone()
+    } else {
+        let defaults: Vec<bool> = std::iter::repeat_n(true, embedded_profiles.len()).collect();
+        let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Select embedded profiles to render into $PC_HOME/templates")
+            .items(&embedded_profiles)
+            .defaults(&defaults)
+            .interact()
+            .context("TUI selection failed")?;
+        selection
+            .into_iter()
+            .map(|idx| embedded_profiles[idx].clone())
+            .collect()
+    };
+
+    for preset in selected_presets {
         let dir = match templates::install_embedded_preset(&preset, args.force) {
             Ok(d) => d,
             Err(e)
@@ -231,7 +291,7 @@ fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
         println!("Installed preset {preset} into {}", dir.display());
     }
 
-    for profile in templates::embedded_profile_names() {
+    for profile in selected_profiles {
         let dir = match templates::install_embedded_preset(&profile, args.force) {
             Ok(d) => d,
             Err(e)
@@ -558,10 +618,6 @@ fn cmd_desktop_on(dir: PathBuf) -> Result<()> {
 }
 
 fn cmd_agent_new(args: AgentNewArgs) -> Result<()> {
-    if !is_valid_agent_name(&args.agent_name) {
-        bail!("agent-name must match: [A-Za-z0-9._-]+");
-    }
-
     ensure_in_path("git")?;
 
     if !git_has_commit()? {
@@ -594,13 +650,28 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     std::fs::create_dir_all(&worktree_base_dir)
         .with_context(|| format!("Failed to create base dir: {}", worktree_base_dir.display()))?;
 
-    let worktree_dir = worktree_base_dir.join(&args.agent_name);
-    if worktree_dir.exists() {
-        bail!("Worktree path already exists: {}", worktree_dir.display());
+    let branch_name = args.branch_name.clone();
+    ensure_git_branch_name_valid(&branch_name)?;
+
+    let agent_name = match args.agent_name {
+        Some(v) => {
+            if !is_valid_agent_name(&v) {
+                bail!("agent-name must match: [A-Za-z0-9._-]+ (and cannot be '.' or '..')");
+            }
+            v
+        }
+        None => derive_agent_name_from_branch(&branch_name)?,
+    };
+
+    let worktree_dir_raw = worktree_base_dir.join(&agent_name);
+    if worktree_dir_raw.exists() {
+        bail!(
+            "Worktree path already exists: {}",
+            worktree_dir_raw.display()
+        );
     }
 
-    let branch_name = args.agent_name.clone();
-    if let Some(existing) = git_worktree_path_for_basename(&args.agent_name)? {
+    if let Some(existing) = git_worktree_path_for_basename(&agent_name)? {
         bail!(
             "A worktree directory with the same name already exists: {}",
             existing.display()
@@ -625,31 +696,72 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     };
 
     ensure_git_ref_exists(&base_ref)?;
-    git_worktree_add(&worktree_dir, &branch_name, &base_ref)?;
-    let worktree_dir = std::fs::canonicalize(&worktree_dir)
-        .with_context(|| format!("Failed to resolve worktree dir: {}", worktree_dir.display()))?;
-
-    let compose_project = format!("agent_{}", sanitize_compose(&args.agent_name));
+    let compose_project = format!("agent_{}", sanitize_compose(&agent_name));
     let cache_prefix = sanitize_compose(&repo_name);
+    let meta = AgentMeta {
+        preset: args.preset.clone(),
+        compose_project: compose_project.clone(),
+        cache_prefix: cache_prefix.clone(),
+        branch_name: Some(branch_name.clone()),
+    };
 
+    let created_branch = git_worktree_add(&worktree_dir_raw, &branch_name, &base_ref)?;
+    let worktree_dir = match std::fs::canonicalize(&worktree_dir_raw) {
+        Ok(p) => p,
+        Err(e) => {
+            rollback_failed_agent_new(
+                &repo_root,
+                &agent_name,
+                &worktree_dir_raw,
+                &branch_name,
+                created_branch,
+                &meta,
+            )?;
+            return Err(anyhow::Error::new(e).context(format!(
+                "Failed to resolve worktree dir: {}",
+                worktree_dir_raw.display()
+            )));
+        }
+    };
+
+    if agent_name != branch_name {
+        println!("Agent:    {agent_name}");
+    }
     println!("Worktree: {}", worktree_dir.display());
     println!("Branch:   {branch_name}");
     println!("Compose:  {compose_project}");
 
-    write_agent_meta(
-        &args.agent_name,
-        AgentMeta {
-            preset: args.preset.clone(),
-            compose_project: compose_project.clone(),
-            cache_prefix: cache_prefix.clone(),
-        },
-    )?;
-
     if args.no_up {
+        if let Err(e) = write_agent_meta(&agent_name, meta) {
+            rollback_failed_agent_new(
+                &repo_root,
+                &agent_name,
+                &worktree_dir,
+                &branch_name,
+                created_branch,
+                &AgentMeta {
+                    preset: args.preset.clone(),
+                    compose_project,
+                    cache_prefix,
+                    branch_name: Some(branch_name.clone()),
+                },
+            )?;
+            return Err(e);
+        }
         return Ok(());
     }
 
-    ensure_in_path("devcontainer")?;
+    if let Err(e) = ensure_in_path("devcontainer") {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &meta,
+        )?;
+        return Err(e);
+    }
     let mut env = vec![
         ("COMPOSE_PROJECT_NAME", compose_project.clone()),
         ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.clone()),
@@ -658,8 +770,8 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
 
-    if workspace_has_devcontainer_config(&worktree_dir) {
-        devcontainer_up(&worktree_dir, None, &env)?;
+    let up_result = if workspace_has_devcontainer_config(&worktree_dir) {
+        devcontainer_up(&worktree_dir, None, &env)
     } else {
         devcontainer_up_stealth(
             &worktree_dir,
@@ -668,7 +780,37 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
             &compose_project,
             &cache_prefix,
             args.desktop,
+        )
+        .map(|_| ())
+    };
+
+    if let Err(e) = up_result {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &meta,
         )?;
+        return Err(e);
+    }
+
+    if let Err(e) = write_agent_meta(&agent_name, meta) {
+        rollback_failed_agent_new(
+            &repo_root,
+            &agent_name,
+            &worktree_dir,
+            &branch_name,
+            created_branch,
+            &AgentMeta {
+                preset: args.preset.clone(),
+                compose_project,
+                cache_prefix,
+                branch_name: Some(branch_name.clone()),
+            },
+        )?;
+        return Err(e);
     }
 
     if !args.no_open && is_in_path("code") {
@@ -681,10 +823,51 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
     Ok(())
 }
 
-fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
-    if !is_valid_agent_name(&args.agent_name) {
-        bail!("agent-name must match: [A-Za-z0-9._-]+");
+fn rollback_failed_agent_new(
+    repo_root: &Path,
+    agent_name: &str,
+    worktree_dir: &Path,
+    branch_name: &str,
+    created_branch: bool,
+    meta: &AgentMeta,
+) -> Result<()> {
+    // Best-effort rollback: treat "agent new" like a transaction.
+    if let Err(e) = docker_compose_down_if_present(worktree_dir) {
+        eprintln!(
+            "Warning: docker compose down failed during rollback for {}: {e:#}",
+            worktree_dir.display()
+        );
     }
+    if let Err(e) = docker_compose_down_stealth(worktree_dir, meta) {
+        eprintln!(
+            "Warning: docker compose down (stealth) failed during rollback for {}: {e:#}",
+            worktree_dir.display()
+        );
+    }
+    if let Err(e) = git_worktree_remove(worktree_dir, true) {
+        eprintln!(
+            "Warning: git worktree remove --force failed during rollback for {}: {e:#}",
+            worktree_dir.display()
+        );
+    }
+    if created_branch {
+        if let Err(e) = git_branch_delete_force(repo_root, branch_name) {
+            eprintln!(
+                "Warning: git branch -D failed during rollback for {}: {e:#}",
+                branch_name
+            );
+        }
+    }
+    if let Err(e) = remove_agent_meta(agent_name) {
+        eprintln!(
+            "Warning: failed to remove agent metadata during rollback for {}: {e:#}",
+            agent_name
+        );
+    }
+    Ok(())
+}
+
+fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     ensure_in_path("git")?;
 
     let repo_root = git_repo_root()?;
@@ -705,8 +888,20 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
         parent.join(format!("{repo_name}-agents"))
     };
 
-    let expected_dir = worktree_base_dir.join(&args.agent_name);
-    let branch_name = args.agent_name.clone();
+    let branch_name = args.branch_name.clone();
+    ensure_git_branch_name_valid(&branch_name)?;
+
+    let agent_name = match args.agent_name {
+        Some(v) => {
+            if !is_valid_agent_name(&v) {
+                bail!("agent-name must match: [A-Za-z0-9._-]+ (and cannot be '.' or '..')");
+            }
+            v
+        }
+        None => derive_agent_name_from_branch(&branch_name)?,
+    };
+
+    let expected_dir = worktree_base_dir.join(&agent_name);
 
     let worktree_dir = if expected_dir.exists() {
         expected_dir
@@ -733,10 +928,11 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     ensure_git_exclude(&worktree_dir, ".pytest_cache/")?;
     ensure_git_exclude(&worktree_dir, ".ruff_cache/")?;
 
-    let meta = read_agent_meta(&args.agent_name)?.unwrap_or_else(|| AgentMeta {
+    let meta = read_agent_meta(&agent_name)?.unwrap_or_else(|| AgentMeta {
         preset: "python-uv".to_string(),
-        compose_project: format!("agent_{}", sanitize_compose(&args.agent_name)),
+        compose_project: format!("agent_{}", sanitize_compose(&agent_name)),
         cache_prefix: sanitize_compose(&repo_name),
+        branch_name: Some(branch_name.clone()),
     });
 
     if let Err(e) = docker_compose_down_if_present(&worktree_dir) {
@@ -768,9 +964,9 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     // Do not delete the agent branch by default; removing the worktree is enough.
     // Users can delete the branch manually if desired.
 
-    remove_agent_meta(&args.agent_name)?;
+    remove_agent_meta(&agent_name)?;
 
-    println!("Removed agent {}", args.agent_name);
+    println!("Removed agent {agent_name}");
     Ok(())
 }
 
@@ -1127,16 +1323,80 @@ fn devcontainer_up(
     override_config: Option<&Path>,
     env: &[(&str, String)],
 ) -> Result<()> {
+    // Kept for backward compatibility: the upstream codebase expects `config`.
+    let config = override_config;
+    if is_in_path("docker") {
+        let compose_path = if let Some(cfg) = config {
+            cfg.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("compose.yaml")
+        } else {
+            dir.join(".devcontainer").join("compose.yaml")
+        };
+        let cache_prefix = cache_prefix_from_env(env).unwrap_or_else(|| "devcontainer".to_string());
+        if let Err(e) = ensure_external_cache_volumes_exist(&compose_path, &cache_prefix) {
+            eprintln!(
+                "Warning: failed to ensure external cache volumes for {}: {e:#}",
+                compose_path.display()
+            );
+        }
+    }
     let mut cmd = Command::new("devcontainer");
     cmd.arg("up").arg("--workspace-folder").arg(dir);
-    if let Some(cfg) = override_config {
-        cmd.arg("--override-config").arg(cfg);
+    if let Some(cfg) = config {
+        cmd.arg("--config").arg(cfg);
     }
     for (k, v) in env {
         cmd.env(k, v);
     }
-    run_ok(cmd).context("devcontainer up failed")?;
+    run_ok_capture_output(cmd).context("devcontainer up failed")?;
     Ok(())
+}
+
+fn cache_prefix_from_env(env: &[(&str, String)]) -> Option<String> {
+    env.iter()
+        .find(|(k, _)| *k == "DEVCONTAINER_CACHE_PREFIX")
+        .map(|(_, v)| v.clone())
+}
+
+fn ensure_external_cache_volumes_exist(compose_path: &Path, cache_prefix: &str) -> Result<()> {
+    if !compose_path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(compose_path)
+        .with_context(|| format!("Failed to read {}", compose_path.display()))?;
+
+    // Only create volumes that appear in the compose.yaml.
+    let suffixes = [
+        "uv-cache",
+        "pip-cache",
+        "pnpm-home",
+        "npm-cache",
+        "vscode-extensions",
+        "go-mod-cache",
+        "go-build-cache",
+    ];
+
+    for suffix in suffixes {
+        let needle = format!("-{suffix}");
+        if !text.contains(&needle) {
+            continue;
+        }
+        ensure_docker_volume(&format!("{cache_prefix}-{suffix}"))?;
+    }
+    Ok(())
+}
+
+fn ensure_docker_volume(name: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["volume", "create", name])
+        .status()
+        .context("Failed to run docker volume create")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("docker volume create {name} failed with status: {status}");
+    }
 }
 
 fn devcontainer_up_stealth(
@@ -1153,12 +1413,29 @@ fn devcontainer_up_stealth(
     let dc_dir = templates::ensure_runtime_preset_stealth(preset, force_runtime)?;
     let dc_json = dc_dir.join("devcontainer.json");
 
+    let uses_image = dc_dir.join("compose.yaml").exists()
+        && std::fs::read_to_string(dc_dir.join("compose.yaml"))
+            .map(|s| s.contains("DEVCONTAINER_IMAGE"))
+            .unwrap_or(false);
+    let image = if uses_image {
+        let image = devcontainer_image_tag_for_dir(&dc_dir)?;
+        if let Some(img) = &image {
+            ensure_docker_image_built(&dc_dir, img)?;
+        }
+        image
+    } else {
+        None
+    };
+
     let mut env = vec![
         ("PC_WORKSPACE_DIR", abs.to_string_lossy().to_string()),
         ("PC_DEVCONTAINER_DIR", dc_dir.to_string_lossy().to_string()),
         ("COMPOSE_PROJECT_NAME", compose_project.to_string()),
         ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.to_string()),
     ];
+    if let Some(img) = image {
+        env.push(("DEVCONTAINER_IMAGE", img));
+    }
     if desktop {
         env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
@@ -1200,7 +1477,8 @@ fn is_in_path(bin: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn require_existing_dir(dir: &Path) -> Result<PathBuf> {
@@ -1212,8 +1490,7 @@ fn require_existing_dir(dir: &Path) -> Result<PathBuf> {
     if !meta.is_dir() {
         bail!("Not a directory: {}", dir.display());
     }
-    Ok(std::fs::canonicalize(dir)
-        .with_context(|| format!("Failed to resolve {}", dir.display()))?)
+    std::fs::canonicalize(dir).with_context(|| format!("Failed to resolve {}", dir.display()))
 }
 
 fn run_ok(mut cmd: Command) -> Result<ExitStatus> {
@@ -1225,12 +1502,99 @@ fn run_ok(mut cmd: Command) -> Result<ExitStatus> {
     }
 }
 
+fn command_string(cmd: &Command) -> String {
+    let prog = cmd.get_program().to_string_lossy();
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    if args.is_empty() {
+        prog.to_string()
+    } else {
+        format!("{prog} {}", args.join(" "))
+    }
+}
+
+fn run_ok_capture_output(mut cmd: Command) -> Result<ExitStatus> {
+    let cmd_str = command_string(&cmd);
+    let output = cmd.output().context("Failed to spawn command")?;
+    if output.status.success() {
+        return Ok(output.status);
+    }
+
+    let code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() { stderr } else { stdout };
+    let details = if details.is_empty() {
+        "<no output>".to_string()
+    } else {
+        let max = 8 * 1024;
+        if details.len() > max {
+            format!("{}...(truncated)", &details[..max])
+        } else {
+            details
+        }
+    };
+
+    bail!("{cmd_str} failed (exit {code}): {details}");
+}
+
 fn short_hash(path: &Path) -> String {
     use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
     hasher.update(path.to_string_lossy().as_bytes());
     let hex = format!("{:x}", hasher.finalize());
     hex.chars().take(8).collect()
+}
+
+fn devcontainer_image_tag_for_dir(dc_dir: &Path) -> Result<Option<String>> {
+    use sha1::{Digest, Sha1};
+    let dockerfile = dc_dir.join("Dockerfile");
+    if !dockerfile.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&dockerfile)
+        .with_context(|| format!("Failed to read {}", dockerfile.display()))?;
+    let mut hasher = Sha1::new();
+    hasher.update(&bytes);
+    let hex = format!("{:x}", hasher.finalize());
+    Ok(Some(format!(
+        "pc-devcontainer:{}",
+        hex.chars().take(12).collect::<String>()
+    )))
+}
+
+fn ensure_docker_image_built(dc_dir: &Path, image: &str) -> Result<()> {
+    if !is_in_path("docker") {
+        return Ok(());
+    }
+
+    let exists = Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run docker image inspect")?
+        .success();
+    if exists {
+        return Ok(());
+    }
+
+    let status = Command::new("docker")
+        .current_dir(dc_dir)
+        .args(["build", "-f", "Dockerfile", "-t", image, "."])
+        .status()
+        .context("Failed to run docker build")?;
+    if !status.success() {
+        bail!("docker build failed with status: {status}");
+    }
+    Ok(())
 }
 
 fn sanitize_compose(raw: &str) -> String {
@@ -1298,13 +1662,6 @@ fn remove_agent_meta(agent_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_valid_agent_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-}
-
 fn git_repo_root() -> Result<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -1345,7 +1702,21 @@ fn ensure_git_ref_exists(name: &str) -> Result<()> {
     }
 }
 
-fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<()> {
+fn ensure_git_branch_name_valid(name: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["check-ref-format", "--branch", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("Failed to run git check-ref-format --branch")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("Invalid branch name: {name}");
+    }
+}
+
+fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<bool> {
     let ref_name = format!("refs/heads/{branch_name}");
     let branch_exists = Command::new("git")
         .args(["show-ref", "--verify", "--quiet", &ref_name])
@@ -1365,7 +1736,7 @@ fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> R
             .arg(base_ref);
     }
     run_ok(cmd).context("git worktree add failed")?;
-    Ok(())
+    Ok(!branch_exists)
 }
 
 fn git_worktree_remove(path: &Path, force: bool) -> Result<bool> {
@@ -1438,6 +1809,29 @@ fn git_status_porcelain(worktree_dir: &Path) -> Result<String> {
         bail!("git status failed");
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_branch_delete_force(repo_root: &Path, branch_name: &str) -> Result<()> {
+    let ref_name = format!("refs/heads/{branch_name}");
+    let exists = Command::new("git")
+        .current_dir(repo_root)
+        .args(["show-ref", "--verify", "--quiet", &ref_name])
+        .status()
+        .context("Failed to run git show-ref --verify")?;
+    if !exists.success() {
+        return Ok(());
+    }
+
+    let status = Command::new("git")
+        .current_dir(repo_root)
+        .args(["branch", "-D", branch_name])
+        .status()
+        .context("Failed to run git branch -D")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("git branch -D {branch_name} failed with status: {status}");
+    }
 }
 
 fn git_worktree_path_for_branch(branch_name: &str) -> Result<Option<PathBuf>> {

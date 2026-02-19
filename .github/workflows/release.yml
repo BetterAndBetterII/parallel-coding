@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fmt
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+  release:
+    name: Tag + GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        id: meta
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; data=json.load(sys.stdin); root=(data.get("workspace_default_members") or data.get("workspace_members") or [data["packages"][0]["id"]])[0]; pkg=next(p for p in data["packages"] if p["id"]==root); print(pkg["version"])')"
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag exists
+        id: check_tag
+        shell: bash
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${tag} already exists; skipping release."
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (release)
+        if: steps.check_tag.outputs.should_release == 'true'
+        run: cargo build --release --locked
+
+      - name: Prepare release assets
+        if: steps.check_tag.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/pc dist/pc-x86_64-unknown-linux-gnu
+          sha256sum dist/pc-x86_64-unknown-linux-gnu > dist/pc-x86_64-unknown-linux-gnu.sha256
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/pc-x86_64-unknown-linux-gnu
+            dist/pc-x86_64-unknown-linux-gnu.sha256

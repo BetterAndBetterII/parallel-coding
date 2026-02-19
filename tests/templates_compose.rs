@@ -40,6 +40,8 @@ fn templates_compose_writes_only_selected_stacks() {
 
     assert!(compose.contains("uv_cache"));
     assert!(compose.contains("pip_cache"));
+    assert!(compose.contains("uv_cache:\n    external: true"));
+    assert!(compose.contains("pip_cache:\n    external: true"));
     assert!(!compose.contains("go_mod_cache"));
     assert!(!compose.contains("pnpm_home"));
 }
