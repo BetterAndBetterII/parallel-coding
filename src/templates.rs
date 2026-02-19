@@ -313,8 +313,6 @@ fn make_compose_stealth(compose: &str, default_image: &str) -> Result<String> {
 
     let mut in_dev_service = false;
     let mut skipping_build_block = false;
-    let mut inserted_image = false;
-
     let mut out = Vec::new();
     for line in compose.lines() {
         let trimmed = line.trim_start();
@@ -335,7 +333,6 @@ fn make_compose_stealth(compose: &str, default_image: &str) -> Result<String> {
 
         if in_dev_service && indent_len == 4 && trimmed == "build:" {
             out.push(image_line.clone());
-            inserted_image = true;
             skipping_build_block = true;
             continue;
         }
