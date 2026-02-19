@@ -50,126 +50,17 @@ mod unix_only {
         format!("{}:{}", stub_bin.display(), old)
     }
 
-    #[test]
-    fn agent_new_can_be_tested_with_mocked_devcontainer_and_docker() {
-        let td = TempDir::new().unwrap();
-        let repo = td.path().join("repo");
-        init_repo(&repo);
-
-        let agents = td.path().join("agents");
-        fs::create_dir_all(&agents).unwrap();
-
-        let pc_home = td.path().join("pc-home");
-        fs::create_dir_all(&pc_home).unwrap();
-
-        let stub_bin = td.path().join("bin");
-        fs::create_dir_all(&stub_bin).unwrap();
-
-        let devcontainer_log = td.path().join("devcontainer.log");
-        let docker_volumes = td.path().join("docker-volumes.log");
-        let docker_log = td.path().join("docker.log");
-
-        write_executable(
-            &stub_bin,
-            "devcontainer",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "devcontainer 0.0"
-  exit 0
-fi
-echo "ARGS:$@" >> "$PC_DEVCONTAINER_LOG"
-echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME" >> "$PC_DEVCONTAINER_LOG"
-echo "DEVCONTAINER_CACHE_PREFIX=$DEVCONTAINER_CACHE_PREFIX" >> "$PC_DEVCONTAINER_LOG"
-exit 0
-"#,
-        );
-
-        write_executable(
-            &stub_bin,
-            "docker",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "Docker version 0.0"
-  exit 0
-fi
-if [ "$1" = "volume" ] && [ "$2" = "create" ]; then
-  echo "$3" >> "$PC_DOCKER_VOLUMES"
-  exit 0
-fi
-echo "ARGS:$@" >> "$PC_DOCKER_LOG"
-exit 0
-"#,
-        );
-
-        Command::new(assert_cmd::cargo::cargo_bin!("pc"))
-            .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
-            .env("PC_DEVCONTAINER_LOG", &devcontainer_log)
-            .env("PC_DOCKER_VOLUMES", &docker_volumes)
-            .env("PC_DOCKER_LOG", &docker_log)
-            .env("PATH", prepend_path(&stub_bin))
-            .args([
-                "agent",
-                "new",
-                "agent-a",
-                "--no-open",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
-            .assert()
-            .success();
-
-        let worktree = agents.join("agent-a");
-        assert!(worktree.exists(), "worktree dir should exist");
-        assert!(
-            worktree.join(".devcontainer").join("devcontainer.json").exists(),
-            "agent new should materialize .devcontainer/devcontainer.json in the worktree"
-        );
-        assert!(
-            worktree.join(".devcontainer").join(".env").exists(),
-            "agent new should write .devcontainer/.env for stable compose project/env"
-        );
-
-        let dc_text = fs::read_to_string(&devcontainer_log).unwrap();
-        assert!(
-            dc_text.contains("ARGS:up --workspace-folder"),
-            "devcontainer up should be invoked: {dc_text}"
-        );
-        assert!(
-            !dc_text.contains("--config"),
-            "agent new should use worktree .devcontainer (no --config): {dc_text}"
-        );
-        assert!(
-            dc_text.contains("COMPOSE_PROJECT_NAME=agent_agent_a"),
-            "compose project should be passed via env: {dc_text}"
-        );
-        assert!(
-            dc_text.contains("DEVCONTAINER_CACHE_PREFIX=repo"),
-            "cache prefix should be repo name: {dc_text}"
-        );
-
-        let vols: Vec<String> = fs::read_to_string(&docker_volumes)
-            .unwrap()
+    fn parse_worktree_from_stdout(stdout: &[u8]) -> PathBuf {
+        let s = String::from_utf8_lossy(stdout);
+        let line = s
             .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        for expected in [
-            "repo-uv-cache",
-            "repo-pip-cache",
-            "repo-pnpm-home",
-            "repo-npm-cache",
-            "repo-vscode-extensions",
-        ] {
-            assert!(
-                vols.iter().any(|v| v == expected),
-                "expected docker volume create {expected}, got: {vols:?}"
-            );
-        }
+            .find(|l| l.starts_with("Worktree: "))
+            .unwrap_or_else(|| panic!("missing Worktree line in stdout:\n{s}"));
+        PathBuf::from(line.trim_start_matches("Worktree: ").trim())
     }
 
     #[test]
-    fn agent_rm_runs_docker_compose_down_without_volumes_flag() {
+    fn agent_new_opens_vscode_with_local_worktree_folder() {
         let td = TempDir::new().unwrap();
         let repo = td.path().join("repo");
         init_repo(&repo);
@@ -177,70 +68,60 @@ exit 0
         let agents = td.path().join("agents");
         fs::create_dir_all(&agents).unwrap();
 
-        Command::new(assert_cmd::cargo::cargo_bin!("pc"))
-            .current_dir(&repo)
-            .args([
-                "agent",
-                "new",
-                "agent-a",
-                "--no-up",
-                "--no-open",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
-            .assert()
-            .success();
-
-        let worktree = agents.join("agent-a");
-        let dc_dir = worktree.join(".devcontainer");
-        fs::create_dir_all(&dc_dir).unwrap();
-        fs::write(dc_dir.join("compose.yaml"), "services: {}\n").unwrap();
-        fs::write(dc_dir.join(".env"), "COMPOSE_PROJECT_NAME=agent_agent_a\n").unwrap();
-
         let stub_bin = td.path().join("bin");
         fs::create_dir_all(&stub_bin).unwrap();
-        let docker_log = td.path().join("docker.log");
+        let code_log = td.path().join("code.log");
 
         write_executable(
             &stub_bin,
-            "docker",
+            "code",
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo "Docker version 0.0"
+  echo "code 0.0"
   exit 0
 fi
-echo "ARGS:$@" >> "$PC_DOCKER_LOG"
+echo "ARGS:$@" >> "$PC_CODE_LOG"
 exit 0
 "#,
         );
 
-        Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_DOCKER_LOG", &docker_log)
+            .env("PC_CODE_LOG", &code_log)
             .env("PATH", prepend_path(&stub_bin))
             .args([
                 "agent",
-                "rm",
+                "new",
                 "agent-a",
                 "--base-dir",
                 agents.to_str().unwrap(),
             ])
-            .assert()
-            .success();
-
-        let text = fs::read_to_string(&docker_log).unwrap();
+            .output()
+            .unwrap();
         assert!(
-            text.contains("ARGS:compose -f compose.yaml --env-file .env down --remove-orphans"),
-            "docker compose down should be invoked with --env-file when present: {text}"
+            output.status.success(),
+            "pc agent new failed: stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let worktree = parse_worktree_from_stdout(&output.stdout);
+        assert!(worktree.exists(), "worktree dir should exist");
+
+        let text = fs::read_to_string(&code_log).unwrap();
+        assert!(
+            text.contains("ARGS:--new-window"),
+            "expected VS Code to be invoked with --new-window. log: {text}"
         );
         assert!(
-            !text.contains(" -v ") && !text.contains("--volumes"),
-            "should not remove volumes by default: {text}"
+            text.contains(worktree.to_string_lossy().as_ref()),
+            "expected VS Code to be invoked with worktree path {}. log: {text}",
+            worktree.display()
         );
     }
 
     #[test]
-    fn agent_new_should_rollback_worktree_and_branch_on_failure() {
+    fn agent_new_rolls_back_worktree_and_branch_when_meta_write_fails() {
         let td = TempDir::new().unwrap();
         let repo = td.path().join("repo");
         init_repo(&repo);
@@ -248,46 +129,27 @@ exit 0
         let agents = td.path().join("agents");
         fs::create_dir_all(&agents).unwrap();
 
-        let pc_home = td.path().join("pc-home");
-        fs::create_dir_all(&pc_home).unwrap();
-
-        let stub_bin = td.path().join("bin");
-        fs::create_dir_all(&stub_bin).unwrap();
-
-        write_executable(
-            &stub_bin,
-            "devcontainer",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "devcontainer 0.0"
-  exit 0
-fi
-exit 0
-"#,
-        );
-
-        write_executable(
-            &stub_bin,
-            "docker",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "Docker version 0.0"
-  exit 0
-fi
-exit 0
-"#,
-        );
+        // Make the metadata *file path* a directory so `pc agent new` fails after creating the worktree.
+        let out = StdCommand::new("git")
+            .current_dir(&repo)
+            .args([
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "pc/agents/agent-a.json",
+            ])
+            .output()
+            .expect("spawn git rev-parse --git-path");
+        assert!(out.status.success());
+        let meta_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        fs::create_dir_all(&meta_path).unwrap();
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
-            .env("PATH", prepend_path(&stub_bin))
             .args([
                 "agent",
                 "new",
                 "agent-a",
-                "--preset",
-                "__does_not_exist__",
                 "--no-open",
                 "--base-dir",
                 agents.to_str().unwrap(),
@@ -309,77 +171,6 @@ exit 0
         assert!(
             !status.success(),
             "newly-created branch should be rolled back on failure"
-        );
-    }
-
-    #[test]
-    fn agent_new_should_rollback_when_devcontainer_up_fails() {
-        let td = TempDir::new().unwrap();
-        let repo = td.path().join("repo");
-        init_repo(&repo);
-
-        let agents = td.path().join("agents");
-        fs::create_dir_all(&agents).unwrap();
-
-        let pc_home = td.path().join("pc-home");
-        fs::create_dir_all(&pc_home).unwrap();
-
-        let stub_bin = td.path().join("bin");
-        fs::create_dir_all(&stub_bin).unwrap();
-
-        write_executable(
-            &stub_bin,
-            "devcontainer",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "devcontainer 0.0"
-  exit 0
-fi
-exit 42
-"#,
-        );
-
-        write_executable(
-            &stub_bin,
-            "docker",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "Docker version 0.0"
-  exit 0
-fi
-exit 0
-"#,
-        );
-
-        Command::new(assert_cmd::cargo::cargo_bin!("pc"))
-            .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
-            .env("PATH", prepend_path(&stub_bin))
-            .args([
-                "agent",
-                "new",
-                "agent-a",
-                "--no-open",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
-            .assert()
-            .failure();
-
-        let worktree = agents.join("agent-a");
-        assert!(
-            !worktree.exists(),
-            "worktree dir should be removed on devcontainer failure"
-        );
-
-        let status = StdCommand::new("git")
-            .current_dir(&repo)
-            .args(["show-ref", "--verify", "--quiet", "refs/heads/agent-a"])
-            .status()
-            .unwrap();
-        assert!(
-            !status.success(),
-            "newly-created branch should be rolled back on devcontainer failure"
         );
     }
 }

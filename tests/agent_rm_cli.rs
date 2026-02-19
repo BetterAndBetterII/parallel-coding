@@ -42,17 +42,12 @@ mod unix_only {
         let agents = td.path().join("agents");
         fs::create_dir_all(&agents).unwrap();
 
-        let pc_home = td.path().join("pc-home");
-        fs::create_dir_all(&pc_home).unwrap();
-
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
             .args([
                 "agent",
                 "new",
                 "feat/a",
-                "--no-up",
                 "--no-open",
                 "--base-dir",
                 agents.to_str().unwrap(),
@@ -63,24 +58,8 @@ mod unix_only {
         assert!(agents.join("feat_a").exists());
         assert!(git_show_ref(&repo, "refs/heads/feat/a"));
 
-        let stub_bin = td.path().join("bin");
-        fs::create_dir_all(&stub_bin).unwrap();
-        common::write_executable(
-            &stub_bin,
-            "docker",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "Docker version 0.0"
-  exit 0
-fi
-exit 0
-"#,
-        );
-
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
-            .env("PATH", common::prepend_path(&stub_bin))
             .args([
                 "agent",
                 "rm",
@@ -110,17 +89,12 @@ exit 0
         let agents = td.path().join("agents");
         fs::create_dir_all(&agents).unwrap();
 
-        let pc_home = td.path().join("pc-home");
-        fs::create_dir_all(&pc_home).unwrap();
-
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
             .args([
                 "agent",
                 "new",
                 "feat/a",
-                "--no-up",
                 "--no-open",
                 "--base-dir",
                 agents.to_str().unwrap(),
@@ -140,24 +114,8 @@ exit 0
         )
         .unwrap();
 
-        let stub_bin = td.path().join("bin");
-        fs::create_dir_all(&stub_bin).unwrap();
-        common::write_executable(
-            &stub_bin,
-            "docker",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "Docker version 0.0"
-  exit 0
-fi
-exit 0
-"#,
-        );
-
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
-            .env("PATH", common::prepend_path(&stub_bin))
             .args([
                 "agent",
                 "rm",
@@ -172,8 +130,6 @@ exit 0
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .env("PC_HOME", &pc_home)
-            .env("PATH", common::prepend_path(&stub_bin))
             .args([
                 "agent",
                 "rm",

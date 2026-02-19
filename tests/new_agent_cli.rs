@@ -32,7 +32,6 @@ fn agent_new_rejects_invalid_branch_names() {
             "agent",
             "new",
             "bad branch",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -47,7 +46,6 @@ fn agent_new_rejects_invalid_branch_names() {
             "agent",
             "new",
             "@{",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -61,7 +59,6 @@ fn agent_new_rejects_invalid_branch_names() {
         .args([
             "agent",
             "new",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -88,21 +85,19 @@ fn agent_new_derives_agent_name_for_branch_with_slash() {
             "agent",
             "new",
             "feat/a",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(contains("Agent:    feat_a"))
-        .stdout(contains("Compose:  agent_feat_a"));
+        .stdout(contains("Agent:    feat_a"));
 
     assert!(agents.join("feat_a").exists());
 }
 
 #[test]
-fn agent_new_agent_name_override_controls_worktree_dir_and_compose_project() {
+fn agent_new_agent_name_override_controls_worktree_dir() {
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     common::init_repo(&repo);
@@ -118,15 +113,13 @@ fn agent_new_agent_name_override_controls_worktree_dir_and_compose_project() {
             "feat/a",
             "--agent-name",
             "agent-a",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
         ])
         .assert()
         .success()
-        .stdout(contains("Agent:    agent-a"))
-        .stdout(contains("Compose:  agent_agent_a"));
+        .stdout(contains("Agent:    agent-a"));
 
     assert!(agents.join("agent-a").exists());
 }
@@ -145,7 +138,6 @@ fn pc_new_alias_works() {
         .args([
             "new",
             "feat/a",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -171,7 +163,6 @@ fn agent_new_rejects_dot_agent_name() {
             "feat/a",
             "--agent-name",
             ".",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -196,7 +187,6 @@ fn agent_new_detects_agent_name_collisions() {
             "agent",
             "new",
             "feat/a",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -210,7 +200,6 @@ fn agent_new_detects_agent_name_collisions() {
             "agent",
             "new",
             "feat_a",
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
@@ -237,7 +226,6 @@ fn agent_new_errors_when_derived_agent_name_is_too_long() {
             "agent",
             "new",
             &branch,
-            "--no-up",
             "--no-open",
             "--base-dir",
             agents.to_str().unwrap(),
