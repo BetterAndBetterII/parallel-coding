@@ -292,12 +292,7 @@ fn top_level_new_is_alias_of_agent_new() {
 
     let status = StdCommand::new("git")
         .current_dir(&repo)
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/heads/feat/pc-new",
-        ])
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feat/pc-new"])
         .status()
         .unwrap();
     assert!(status.success(), "branch should exist");

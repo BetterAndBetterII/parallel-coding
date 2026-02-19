@@ -233,7 +233,7 @@ fn cmd_templates_init(args: TemplatesInitArgs) -> Result<()> {
         embedded.to_vec()
     } else {
         let items: Vec<String> = embedded.iter().map(|p| p.to_string()).collect();
-        let defaults: Vec<bool> = std::iter::repeat(true).take(items.len()).collect();
+        let defaults: Vec<bool> = std::iter::repeat_n(true, items.len()).collect();
 
         let selection = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default())
             .with_prompt("Select embedded presets to install into $PC_HOME/templates")
@@ -288,7 +288,7 @@ fn cmd_templates_compose(args: TemplatesComposeArgs) -> Result<()> {
             bail!("--interactive requires a TTY");
         }
 
-        let items = vec![
+        let items = [
             ("Python", "Python runtime + pip"),
             ("UV", "uv (Python package manager)"),
             ("Go", "Go toolchain"),
@@ -844,11 +844,7 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn devcontainer_up(
-    dir: &Path,
-    config: Option<&Path>,
-    env: &[(&str, String)],
-) -> Result<()> {
+fn devcontainer_up(dir: &Path, config: Option<&Path>, env: &[(&str, String)]) -> Result<()> {
     if is_in_path("docker") {
         let compose_path = if let Some(cfg) = config {
             cfg.parent()
@@ -938,9 +934,7 @@ fn devcontainer_up_stealth(
     let dc_dir = templates::ensure_runtime_preset_stealth(preset, force_runtime)?;
     let dc_json = dc_dir.join("devcontainer.json");
 
-    let uses_image = dc_dir
-        .join("compose.yaml")
-        .exists()
+    let uses_image = dc_dir.join("compose.yaml").exists()
         && std::fs::read_to_string(dc_dir.join("compose.yaml"))
             .map(|s| s.contains("DEVCONTAINER_IMAGE"))
             .unwrap_or(false);
@@ -1016,8 +1010,7 @@ fn require_existing_dir(dir: &Path) -> Result<PathBuf> {
     if !meta.is_dir() {
         bail!("Not a directory: {}", dir.display());
     }
-    Ok(std::fs::canonicalize(dir)
-        .with_context(|| format!("Failed to resolve {}", dir.display()))?)
+    std::fs::canonicalize(dir).with_context(|| format!("Failed to resolve {}", dir.display()))
 }
 
 fn run_ok(mut cmd: Command) -> Result<ExitStatus> {
