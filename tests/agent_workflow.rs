@@ -78,7 +78,7 @@ fn agent_new_and_rm_clean_should_not_require_force() {
             "show-ref",
             "--verify",
             "--quiet",
-            "refs/heads/agent/agent-a",
+            "refs/heads/agent-a",
         ])
         .status()
         .unwrap();
