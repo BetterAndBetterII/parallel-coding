@@ -40,6 +40,7 @@ jobs:
     name: Tag + GitHub Release
     needs: verify
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,16 +56,7 @@ jobs:
         id: meta
         shell: bash
         run: |
-          version="$(cargo metadata --no-deps --format-version=1 | python3 - <<'PY'
-          import json, sys
-          data = json.load(sys.stdin)
-          root = data.get("resolve", {}).get("root")
-          if not root:
-            raise SystemExit("cargo metadata missing resolve.root")
-          pkg = next(p for p in data["packages"] if p["id"] == root)
-          print(pkg["version"])
-          PY
-          )"
+          version="$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; data=json.load(sys.stdin); root=data["resolve"]["root"]; pkg=next(p for p in data["packages"] if p["id"]==root); print(pkg["version"])')"
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
