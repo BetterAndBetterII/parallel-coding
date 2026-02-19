@@ -9,6 +9,7 @@ services:
       - pip_cache:/home/vscode/.cache/pip
       - pnpm_home:/home/vscode/.local/share/pnpm
       - npm_cache:/home/vscode/.npm
+      - vscode_extensions:/home/vscode/.vscode-server/extensions
     environment:
       UV_CACHE_DIR: /home/vscode/.cache/uv
       PIP_CACHE_DIR: /home/vscode/.cache/pip
@@ -44,5 +45,6 @@ volumes:
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-pnpm-home
   npm_cache:
     name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-npm-cache
+  vscode_extensions:
+    name: ${DEVCONTAINER_CACHE_PREFIX:-devcontainer}-vscode-extensions
   desktop_home: {}
-
