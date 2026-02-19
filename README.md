@@ -4,12 +4,12 @@
 
 ## 安装
 
-需要本机先安装 Rust（`cargo`）。
+### Linux (Debian/Ubuntu) 一键安装（从 GitHub Release 下载二进制）
 
-在仓库目录内：
+当前提供：`x86_64-unknown-linux-gnu`。
 
 ```bash
-cargo install --path .
+curl -fsSL https://github.com/BetterAndBetterII/parallel-coding/releases/latest/download/pc-x86_64-unknown-linux-gnu -o /tmp/pc && sudo install -m 755 /tmp/pc /usr/local/bin/pc && rm /tmp/pc
 ```
 
 安装后可在任意目录使用：
@@ -17,6 +17,16 @@ cargo install --path .
 ```bash
 pc --help
 ```
+
+### 从源码安装（需要 Rust / cargo）
+
+在仓库目录内：
+
+```bash
+cargo install --path .
+```
+
+安装后可在任意目录使用：`pc --help`
 
 ## 依赖
 
