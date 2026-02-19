@@ -4,8 +4,16 @@ use std::process::{Command, ExitStatus};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Select};
+use serde::{Deserialize, Serialize};
 
 mod templates;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentMeta {
+    preset: String,
+    compose_project: String,
+    cache_prefix: String,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -48,16 +56,16 @@ struct InitArgs {
 struct UpArgs {
     /// Target directory
     dir: PathBuf,
-    /// Initialize if missing .devcontainer
+    /// If missing devcontainer config, write preset files into the workspace
     #[arg(long)]
     init: bool,
-    /// Preset template name (used with --init)
+    /// Preset template name (used for stealth mode and/or with --init)
     #[arg(long, default_value = "python-uv")]
     preset: String,
     /// Also bring up desktop sidecar
     #[arg(long)]
     desktop: bool,
-    /// Overwrite existing .devcontainer/.env
+    /// Overwrite generated runtime preset files (stealth mode)
     #[arg(long)]
     force_env: bool,
 }
@@ -126,7 +134,7 @@ enum AgentCommands {
     New(AgentNewArgs),
     /// Start the optional desktop (webtop) sidecar for a given worktree path
     DesktopOn(AgentDesktopOnArgs),
-    /// Remove an agent: docker compose down + git worktree remove (+ branch delete)
+    /// Remove an agent: docker compose down + git worktree remove
     Rm(AgentRmArgs),
 }
 
@@ -152,7 +160,7 @@ struct AgentNewArgs {
     /// Also start desktop sidecar
     #[arg(long)]
     desktop: bool,
-    /// Overwrite existing .devcontainer/.env
+    /// Overwrite generated runtime preset files (stealth mode)
     #[arg(long)]
     force_env: bool,
     /// Do not open VS Code in a new window
@@ -173,9 +181,6 @@ struct AgentRmArgs {
     /// Base directory to place worktrees (for locating existing worktree dir)
     #[arg(long)]
     base_dir: Option<PathBuf>,
-    /// Keep the agent branch (do not `git branch -D`)
-    #[arg(long)]
-    keep_branch: bool,
     /// Force removal (passes --force to git worktree remove)
     #[arg(long)]
     force: bool,
@@ -314,7 +319,6 @@ fn cmd_templates_compose(args: TemplatesComposeArgs) -> Result<()> {
 fn cmd_init(args: InitArgs) -> Result<()> {
     let dir = require_existing_dir(&args.dir)?;
     copy_preset(&args.preset, &dir, args.force)?;
-    write_env_for_dir(&dir, false)?;
     println!(
         "Initialized: {} (preset: {})",
         dir.join(".devcontainer").display(),
@@ -326,51 +330,64 @@ fn cmd_init(args: InitArgs) -> Result<()> {
 fn cmd_up(args: UpArgs) -> Result<()> {
     let dir = require_existing_dir(&args.dir)?;
 
-    let devcontainer_json = dir.join(".devcontainer").join("devcontainer.json");
-    if !devcontainer_json.exists() {
-        if args.init {
-            copy_preset(&args.preset, &dir, false)?;
-        } else {
-            bail!(
-                "Missing {} (use: pc up --init ...)",
-                devcontainer_json.display()
-            );
-        }
+    let has_config = workspace_has_devcontainer_config(&dir);
+    if !has_config && args.init {
+        copy_preset(&args.preset, &dir, false)?;
     }
-
-    write_env_for_dir(&dir, args.force_env)?;
     ensure_in_path("devcontainer")?;
 
-    if args.desktop {
-        devcontainer_up(&dir, Some(("COMPOSE_PROFILES", "desktop")))?;
+    if workspace_has_devcontainer_config(&dir) {
+        let mut env = Vec::new();
+        if args.desktop {
+            env.push(("COMPOSE_PROFILES", "desktop".to_string()));
+        }
+        devcontainer_up(&dir, None, &env)?;
     } else {
-        devcontainer_up(&dir, None)?;
+        let compose_project = default_compose_project_name(&dir)?;
+        devcontainer_up_stealth(
+            &dir,
+            &args.preset,
+            args.force_env,
+            &compose_project,
+            "dc-cache",
+            args.desktop,
+        )?;
     }
     Ok(())
 }
 
 fn cmd_desktop_on(dir: PathBuf) -> Result<()> {
     let dir = require_existing_dir(&dir)?;
-    let compose_path = dir.join(".devcontainer").join("compose.yaml");
-    if !compose_path.exists() {
-        bail!(
-            "Not a devcontainer directory (missing {}): {}",
-            ".devcontainer/compose.yaml",
-            dir.display()
-        );
-    }
     ensure_in_path("devcontainer")?;
-    write_env_for_dir(&dir, false)?;
-    devcontainer_up(&dir, Some(("COMPOSE_PROFILES", "desktop")))?;
 
+    if workspace_has_devcontainer_config(&dir) {
+        devcontainer_up(&dir, None, &[("COMPOSE_PROFILES", "desktop".to_string())])?;
+        if is_in_path("docker") {
+            if let Some(url) = try_get_desktop_url_local(&dir)? {
+                println!("Desktop URL: {url}");
+            } else {
+                println!("Desktop started. To get the URL:");
+                println!(
+                    "  (cd \"{}\" && docker compose -f compose.yaml port desktop 3000)",
+                    dir.join(".devcontainer").display()
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let compose_project = default_compose_project_name(&dir)?;
+    let (preset_dir, env) =
+        devcontainer_up_stealth(&dir, "python-uv", false, &compose_project, "dc-cache", true)?;
     if is_in_path("docker") {
-        if let Some(url) = try_get_desktop_url(&dir)? {
+        if let Some(url) = try_get_desktop_url_from_compose(&preset_dir, &compose_project, &env)? {
             println!("Desktop URL: {url}");
         } else {
             println!("Desktop started. To get the URL:");
             println!(
-                "  (cd \"{}\" && docker compose -f compose.yaml port desktop 3000)",
-                dir.join(".devcontainer").display()
+                "  (cd \"{}\" && docker compose -p {} -f compose.yaml port desktop 3000)",
+                preset_dir.display(),
+                compose_project
             );
         }
     }
@@ -450,65 +467,45 @@ Fix: create an initial commit, then re-run `pc agent new ...`."
         .with_context(|| format!("Failed to resolve worktree dir: {}", worktree_dir.display()))?;
 
     let compose_project = format!("agent_{}", sanitize_compose(&args.agent_name));
-    let env_file = worktree_dir.join(".devcontainer").join(".env");
-    std::fs::create_dir_all(worktree_dir.join(".devcontainer"))
-        .context("Failed to create .devcontainer directory")?;
-
-    if env_file.exists() && !args.force_env {
-        if can_prompt() {
-            let ok = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!(
-                    "{} already exists. Overwrite it? (equivalent to --force-env)",
-                    env_file.display()
-                ))
-                .default(false)
-                .interact()
-                .context("Prompt failed")?;
-            if !ok {
-                println!("Cancelled. Left existing {}", env_file.display());
-                return Ok(());
-            }
-        } else {
-            bail!(
-                "{} already exists. Use --force-env to overwrite.",
-                env_file.display()
-            );
-        }
-    }
-
-    let env_contents = format!(
-        "# Auto-generated by pc\nCOMPOSE_PROJECT_NAME={}\nDEVCONTAINER_CACHE_PREFIX={}\n",
-        compose_project,
-        sanitize_compose(&repo_name)
-    );
-    std::fs::write(&env_file, env_contents)
-        .with_context(|| format!("Failed to write {}", env_file.display()))?;
-    ensure_git_exclude(&worktree_dir, ".devcontainer/.env")?;
+    let cache_prefix = sanitize_compose(&repo_name);
 
     println!("Worktree: {}", worktree_dir.display());
     println!("Branch:   {branch_name}");
     println!("Compose:  {compose_project}");
 
+    write_agent_meta(
+        &args.agent_name,
+        AgentMeta {
+            preset: args.preset.clone(),
+            compose_project: compose_project.clone(),
+            cache_prefix: cache_prefix.clone(),
+        },
+    )?;
+
     if args.no_up {
         return Ok(());
     }
 
-    let devcontainer_json = worktree_dir.join(".devcontainer").join("devcontainer.json");
-    if !devcontainer_json.exists() {
-        println!(
-            "Devcontainer config missing in worktree; initializing from preset: {}",
-            args.preset
-        );
-        copy_preset(&args.preset, &worktree_dir, false)?;
-        ensure_git_exclude(&worktree_dir, ".devcontainer/devcontainer.json")?;
-        ensure_git_exclude(&worktree_dir, ".devcontainer/compose.yaml")?;
-        ensure_git_exclude(&worktree_dir, ".devcontainer/Dockerfile")?;
+    ensure_in_path("devcontainer")?;
+    let mut env = vec![
+        ("COMPOSE_PROJECT_NAME", compose_project.clone()),
+        ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.clone()),
+    ];
+    if args.desktop {
+        env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
 
-    ensure_in_path("devcontainer")?;
-    devcontainer_up(&worktree_dir, None)?;
-    if args.desktop {
-        devcontainer_up(&worktree_dir, Some(("COMPOSE_PROFILES", "desktop")))?;
+    if workspace_has_devcontainer_config(&worktree_dir) {
+        devcontainer_up(&worktree_dir, None, &env)?;
+    } else {
+        devcontainer_up_stealth(
+            &worktree_dir,
+            &args.preset,
+            args.force_env,
+            &compose_project,
+            &cache_prefix,
+            args.desktop,
+        )?;
     }
 
     if !args.no_open && is_in_path("code") {
@@ -563,7 +560,36 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
     let worktree_dir = std::fs::canonicalize(&worktree_dir)
         .with_context(|| format!("Failed to resolve {}", worktree_dir.display()))?;
 
-    docker_compose_down_if_present(&worktree_dir)?;
+    // Best-effort: ignore typical generated dirs so `git worktree remove` doesn't
+    // require `--force` after normal devcontainer usage (e.g. uv creates .venv).
+    ensure_git_exclude(&worktree_dir, ".devcontainer/")?;
+    ensure_git_exclude(&worktree_dir, ".env")?;
+    ensure_git_exclude(&worktree_dir, ".venv/")?;
+    ensure_git_exclude(&worktree_dir, "node_modules/")?;
+    ensure_git_exclude(&worktree_dir, "target/")?;
+    ensure_git_exclude(&worktree_dir, ".pytest_cache/")?;
+    ensure_git_exclude(&worktree_dir, ".ruff_cache/")?;
+
+    let meta = read_agent_meta(&args.agent_name)?.unwrap_or_else(|| AgentMeta {
+        preset: "python-uv".to_string(),
+        compose_project: format!("agent_{}", sanitize_compose(&args.agent_name)),
+        cache_prefix: sanitize_compose(&repo_name),
+    });
+
+    if let Err(e) = docker_compose_down_if_present(&worktree_dir) {
+        eprintln!(
+            "Warning: docker compose down failed for {}: {e:#}",
+            worktree_dir.display()
+        );
+    }
+    if !worktree_dir.join(".devcontainer").join("compose.yaml").exists() {
+        if let Err(e) = docker_compose_down_stealth(&worktree_dir, &meta) {
+            eprintln!(
+                "Warning: docker compose down (stealth) failed for {}: {e:#}",
+                worktree_dir.display()
+            );
+        }
+    }
     let removed = git_worktree_remove(&worktree_dir, args.force)?;
     if !removed {
         println!(
@@ -572,18 +598,10 @@ fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
         );
         return Ok(());
     }
+    // Do not delete the agent branch by default; removing the worktree is enough.
+    // Users can delete the branch manually if desired.
 
-    if !args.keep_branch {
-        if git_branch_exists(&branch_name)? {
-            let status = Command::new("git")
-                .args(["branch", "-D", &branch_name])
-                .status()
-                .context("Failed to run git branch -D")?;
-            if !status.success() {
-                bail!("git branch -D failed with status: {status}");
-            }
-        }
-    }
+    remove_agent_meta(&args.agent_name)?;
 
     println!("Removed agent {}", args.agent_name);
     Ok(())
@@ -645,41 +663,68 @@ fn copy_preset(preset: &str, dir: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_env_for_dir(dir: &Path, force_env: bool) -> Result<()> {
-    let devcontainer_dir = dir.join(".devcontainer");
-    std::fs::create_dir_all(&devcontainer_dir)
-        .with_context(|| format!("Failed to create {}", devcontainer_dir.display()))?;
+fn devcontainer_up(
+    dir: &Path,
+    override_config: Option<&Path>,
+    env: &[(&str, String)],
+) -> Result<()> {
+    let mut cmd = Command::new("devcontainer");
+    cmd.arg("up").arg("--workspace-folder").arg(dir);
+    if let Some(cfg) = override_config {
+        cmd.arg("--override-config").arg(cfg);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    run_ok(cmd).context("devcontainer up failed")?;
+    Ok(())
+}
 
-    let env_file = devcontainer_dir.join(".env");
-    if env_file.exists() && !force_env {
-        return Ok(());
+fn devcontainer_up_stealth(
+    dir: &Path,
+    preset: &str,
+    force_runtime: bool,
+    compose_project: &str,
+    cache_prefix: &str,
+    desktop: bool,
+) -> Result<(PathBuf, Vec<(&'static str, String)>)> {
+    let abs = std::fs::canonicalize(dir)
+        .with_context(|| format!("Failed to resolve directory: {}", dir.display()))?;
+
+    let dc_dir = templates::ensure_runtime_preset_stealth(preset, force_runtime)?;
+    let dc_json = dc_dir.join("devcontainer.json");
+
+    let mut env = vec![
+        ("PC_WORKSPACE_DIR", abs.to_string_lossy().to_string()),
+        ("PC_DEVCONTAINER_DIR", dc_dir.to_string_lossy().to_string()),
+        ("COMPOSE_PROJECT_NAME", compose_project.to_string()),
+        ("DEVCONTAINER_CACHE_PREFIX", cache_prefix.to_string()),
+    ];
+    if desktop {
+        env.push(("COMPOSE_PROFILES", "desktop".to_string()));
     }
 
+    devcontainer_up(&abs, Some(&dc_json), &env)?;
+    Ok((dc_dir, env))
+}
+
+fn workspace_has_devcontainer_config(dir: &Path) -> bool {
+    dir.join(".devcontainer").join("devcontainer.json").exists()
+        || dir.join(".devcontainer.json").exists()
+}
+
+fn default_compose_project_name(dir: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(dir)
         .with_context(|| format!("Failed to resolve directory: {}", dir.display()))?;
     let base = abs
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("workspace");
-
-    let project = format!("dc_{}_{}", sanitize_compose(base), short_hash(&abs));
-    let contents = format!(
-        "# Auto-generated by pc\nCOMPOSE_PROJECT_NAME={}\nDEVCONTAINER_CACHE_PREFIX=dc-cache\n",
-        project
-    );
-    std::fs::write(&env_file, contents)
-        .with_context(|| format!("Failed to write {}", env_file.display()))?;
-    Ok(())
-}
-
-fn devcontainer_up(dir: &Path, env: Option<(&str, &str)>) -> Result<()> {
-    let mut cmd = Command::new("devcontainer");
-    cmd.arg("up").arg("--workspace-folder").arg(dir);
-    if let Some((k, v)) = env {
-        cmd.env(k, v);
-    }
-    run_ok(cmd).context("devcontainer up failed")?;
-    Ok(())
+    Ok(format!(
+        "dc_{}_{}",
+        sanitize_compose(base),
+        short_hash(&abs)
+    ))
 }
 
 fn ensure_in_path(bin: &str) -> Result<()> {
@@ -745,6 +790,53 @@ fn sanitize_compose(raw: &str) -> String {
     } else {
         out
     }
+}
+
+fn agent_meta_path(agent_name: &str) -> Result<PathBuf> {
+    let rel = format!("pc/agents/{agent_name}.json");
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", &rel])
+        .output()
+        .context("Failed to run git rev-parse --git-path")?;
+    if !output.status.success() {
+        bail!("git rev-parse --git-path failed");
+    }
+    let s = String::from_utf8(output.stdout).context("git output not utf8")?;
+    let p = s.trim();
+    if p.is_empty() {
+        bail!("git-path returned empty path for {rel}");
+    }
+    Ok(PathBuf::from(p))
+}
+
+fn write_agent_meta(agent_name: &str, meta: AgentMeta) -> Result<()> {
+    let path = agent_meta_path(agent_name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&meta)? + "\n";
+    std::fs::write(&path, text).with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn read_agent_meta(agent_name: &str) -> Result<Option<AgentMeta>> {
+    let path = agent_meta_path(agent_name)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(Some(serde_json::from_str::<AgentMeta>(&text)?))
+}
+
+fn remove_agent_meta(agent_name: &str) -> Result<()> {
+    let path = agent_meta_path(agent_name)?;
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn is_valid_agent_name(name: &str) -> bool {
@@ -829,18 +921,12 @@ fn git_worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> R
 }
 
 fn git_worktree_remove(path: &Path, force: bool) -> Result<bool> {
-    if !force {
-        return git_worktree_remove_interactive(path);
-    }
-
-    let mut cmd = Command::new("git");
-    cmd.args(["worktree", "remove"]);
     if force {
-        cmd.arg("--force");
+        run_ok(Command::new("git").args(["worktree", "remove", "--force"]).arg(path))
+            .context("git worktree remove failed")?;
+        return Ok(true);
     }
-    cmd.arg(path);
-    run_ok(cmd).context("git worktree remove failed")?;
-    Ok(true)
+    git_worktree_remove_interactive(path)
 }
 
 fn git_worktree_remove_interactive(path: &Path) -> Result<bool> {
@@ -859,6 +945,12 @@ fn git_worktree_remove_interactive(path: &Path) -> Result<bool> {
     let suggests_force = stderr_trimmed.contains("use --force");
     if suggests_force && can_prompt() {
         println!("{stderr_trimmed}");
+        if let Ok(p) = git_status_porcelain(path) {
+            if !p.trim().is_empty() {
+                println!("Worktree has local changes/untracked files:");
+                println!("{p}");
+            }
+        }
         let ok = Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt(format!(
                 "git worktree remove failed ({}). Retry with --force?",
@@ -885,6 +977,18 @@ fn git_worktree_remove_interactive(path: &Path) -> Result<bool> {
         bail!("git worktree remove failed with status: {}", output.status);
     }
     bail!("git worktree remove failed: {stderr_trimmed}");
+}
+
+fn git_status_porcelain(worktree_dir: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(worktree_dir)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()
+        .context("Failed to run git status")?;
+    if !output.status.success() {
+        bail!("git status failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn git_worktree_path_for_branch(branch_name: &str) -> Result<Option<PathBuf>> {
@@ -951,13 +1055,48 @@ fn docker_compose_down_if_present(worktree_dir: &Path) -> Result<()> {
     if env_file.exists() {
         cmd.args(["--env-file", ".env"]);
     }
-    cmd.args(["down", "-v", "--remove-orphans"]);
+    // Keep volumes by default; cache volumes are often shared across agents.
+    cmd.args(["down", "--remove-orphans"]);
 
     let status = cmd
         .status()
         .context("Failed to spawn docker compose down")?;
     if !status.success() {
         bail!("docker compose down failed with status: {status}");
+    }
+    Ok(())
+}
+
+fn docker_compose_down_stealth(worktree_dir: &Path, meta: &AgentMeta) -> Result<()> {
+    if !is_in_path("docker") {
+        return Ok(());
+    }
+    let abs = std::fs::canonicalize(worktree_dir)
+        .with_context(|| format!("Failed to resolve directory: {}", worktree_dir.display()))?;
+
+    let dc_dir = templates::ensure_runtime_preset_stealth(&meta.preset, false)?;
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(&dc_dir)
+        .args([
+            "compose",
+            "-p",
+            &meta.compose_project,
+            "-f",
+            "compose.yaml",
+            "down",
+            "--remove-orphans",
+        ])
+        .env("PC_WORKSPACE_DIR", abs.to_string_lossy().to_string())
+        .env("PC_DEVCONTAINER_DIR", dc_dir.to_string_lossy().to_string())
+        .env("COMPOSE_PROJECT_NAME", meta.compose_project.clone())
+        .env("DEVCONTAINER_CACHE_PREFIX", meta.cache_prefix.clone())
+        .env("COMPOSE_PROFILES", "desktop");
+
+    let status = cmd
+        .status()
+        .context("Failed to spawn docker compose down (stealth)")?;
+    if !status.success() {
+        bail!("docker compose down (stealth) failed with status: {status}");
     }
     Ok(())
 }
@@ -1053,10 +1192,11 @@ fn ensure_git_exclude(worktree_dir: &Path, pattern: &str) -> Result<()> {
     Ok(())
 }
 
-fn try_get_desktop_url(dir: &Path) -> Result<Option<String>> {
+fn try_get_desktop_url_local(dir: &Path) -> Result<Option<String>> {
     let dc_dir = dir.join(".devcontainer");
     let output = Command::new("docker")
         .current_dir(&dc_dir)
+        .env("COMPOSE_PROFILES", "desktop")
         .args(["compose", "-f", "compose.yaml", "port", "desktop", "3000"])
         .output()
         .context("Failed to run docker compose port")?;
@@ -1069,6 +1209,41 @@ fn try_get_desktop_url(dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     // docker compose port prints like "0.0.0.0:49153" or "127.0.0.1:49153"
+    let (host, port) = mapping
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("Unexpected docker port output: {mapping:?}"))?;
+    let host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+    Ok(Some(format!("http://{host}:{port}/")))
+}
+
+fn try_get_desktop_url_from_compose(
+    dc_dir: &Path,
+    compose_project: &str,
+    env: &[(&str, String)],
+) -> Result<Option<String>> {
+    let mut cmd = Command::new("docker");
+    cmd.current_dir(dc_dir).args([
+        "compose",
+        "-p",
+        compose_project,
+        "-f",
+        "compose.yaml",
+        "port",
+        "desktop",
+        "3000",
+    ]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().context("Failed to run docker compose port")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let s = String::from_utf8_lossy(&output.stdout);
+    let mapping = s.trim();
+    if mapping.is_empty() {
+        return Ok(None);
+    }
     let (host, port) = mapping
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("Unexpected docker port output: {mapping:?}"))?;
