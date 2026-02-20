@@ -18,6 +18,34 @@ fn help_mentions_new_subcommand() {
 }
 
 #[test]
+fn new_without_branch_requires_tty() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    common::init_repo(&repo);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .current_dir(&repo)
+        .args(["new"])
+        .assert()
+        .failure()
+        .stderr(contains("No branch specified").or(contains("TTY")));
+}
+
+#[test]
+fn new_base_without_tty_errors() {
+    let td = TempDir::new().unwrap();
+    let repo = td.path().join("repo");
+    common::init_repo(&repo);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+        .current_dir(&repo)
+        .args(["new", "--base", "--no-open"])
+        .assert()
+        .failure()
+        .stderr(contains("Interactive base selection requires a TTY"));
+}
+
+#[test]
 fn agent_new_rejects_invalid_branch_names() {
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
@@ -29,7 +57,6 @@ fn agent_new_rejects_invalid_branch_names() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "bad branch",
             "--no-open",
@@ -43,7 +70,6 @@ fn agent_new_rejects_invalid_branch_names() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "@{",
             "--no-open",
@@ -57,7 +83,6 @@ fn agent_new_rejects_invalid_branch_names() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "--no-open",
             "--base-dir",
@@ -82,7 +107,6 @@ fn agent_new_derives_agent_name_for_branch_with_slash() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "feat/a",
             "--no-open",
@@ -108,7 +132,6 @@ fn agent_new_agent_name_override_controls_worktree_dir() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "feat/a",
             "--agent-name",
@@ -125,28 +148,6 @@ fn agent_new_agent_name_override_controls_worktree_dir() {
 }
 
 #[test]
-fn pc_new_alias_works() {
-    let td = TempDir::new().unwrap();
-    let repo = td.path().join("repo");
-    common::init_repo(&repo);
-
-    let agents = td.path().join("agents");
-    fs::create_dir_all(&agents).unwrap();
-
-    Command::new(assert_cmd::cargo::cargo_bin!("pc"))
-        .current_dir(&repo)
-        .args([
-            "new",
-            "feat/a",
-            "--no-open",
-            "--base-dir",
-            agents.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-}
-
-#[test]
 fn agent_new_rejects_dot_agent_name() {
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
@@ -158,7 +159,6 @@ fn agent_new_rejects_dot_agent_name() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "feat/a",
             "--agent-name",
@@ -184,7 +184,6 @@ fn agent_new_detects_agent_name_collisions() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "feat/a",
             "--no-open",
@@ -197,7 +196,6 @@ fn agent_new_detects_agent_name_collisions() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "feat_a",
             "--no-open",
@@ -206,7 +204,7 @@ fn agent_new_detects_agent_name_collisions() {
         ])
         .assert()
         .failure()
-        .stderr(contains("already exists"));
+        .stderr(contains("already exists").and(contains("different branch")));
 }
 
 #[test]
@@ -223,7 +221,6 @@ fn agent_new_errors_when_derived_agent_name_is_too_long() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             &branch,
             "--no-open",

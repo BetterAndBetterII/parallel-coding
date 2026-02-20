@@ -44,7 +44,6 @@ fn agent_new_and_rm_clean_should_not_require_force() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "agent-a",
             "--no-open",
@@ -59,13 +58,7 @@ fn agent_new_and_rm_clean_should_not_require_force() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
-        .args([
-            "agent",
-            "rm",
-            "agent-a",
-            "--base-dir",
-            agents.to_str().unwrap(),
-        ])
+        .args(["rm", "agent-a", "--base-dir", agents.to_str().unwrap()])
         .assert()
         .success();
 
@@ -91,7 +84,6 @@ fn agent_rm_without_force_should_fail_if_user_left_untracked_files() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "agent-a",
             "--no-open",
@@ -106,13 +98,7 @@ fn agent_rm_without_force_should_fail_if_user_left_untracked_files() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
-        .args([
-            "agent",
-            "rm",
-            "agent-a",
-            "--base-dir",
-            agents.to_str().unwrap(),
-        ])
+        .args(["rm", "agent-a", "--base-dir", agents.to_str().unwrap()])
         .assert()
         .failure();
 }
@@ -129,7 +115,6 @@ fn agent_rm_should_succeed_with_common_generated_dirs() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "agent-a",
             "--no-open",
@@ -147,13 +132,7 @@ fn agent_rm_should_succeed_with_common_generated_dirs() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
-        .args([
-            "agent",
-            "rm",
-            "agent-a",
-            "--base-dir",
-            agents.to_str().unwrap(),
-        ])
+        .args(["rm", "agent-a", "--base-dir", agents.to_str().unwrap()])
         .assert()
         .success();
 
@@ -161,7 +140,7 @@ fn agent_rm_should_succeed_with_common_generated_dirs() {
 }
 
 #[test]
-fn agent_new_should_refuse_when_worktree_exists() {
+fn agent_new_should_open_existing_worktree_when_it_already_exists() {
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     init_repo(&repo);
@@ -172,7 +151,6 @@ fn agent_new_should_refuse_when_worktree_exists() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "agent-a",
             "--no-open",
@@ -185,7 +163,6 @@ fn agent_new_should_refuse_when_worktree_exists() {
     Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "agent-a",
             "--no-open",
@@ -193,7 +170,7 @@ fn agent_new_should_refuse_when_worktree_exists() {
             agents.to_str().unwrap(),
         ])
         .assert()
-        .failure();
+        .success();
 }
 
 fn parse_worktree_from_stdout(stdout: &[u8]) -> std::path::PathBuf {
@@ -217,7 +194,6 @@ fn agent_new_accepts_branch_names_with_slash() {
     let output = Command::new(assert_cmd::cargo::cargo_bin!("pc"))
         .current_dir(&repo)
         .args([
-            "agent",
             "new",
             "feat/tui-templates",
             "--no-open",
@@ -228,7 +204,7 @@ fn agent_new_accepts_branch_names_with_slash() {
         .unwrap();
     assert!(
         output.status.success(),
-        "pc agent new failed: stdout:\n{}\nstderr:\n{}",
+        "pc new failed: stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -254,7 +230,7 @@ fn agent_new_accepts_branch_names_with_slash() {
 }
 
 #[test]
-fn top_level_new_is_alias_of_agent_new() {
+fn top_level_new_creates_worktree_and_branch() {
     let td = TempDir::new().unwrap();
     let repo = td.path().join("repo");
     init_repo(&repo);

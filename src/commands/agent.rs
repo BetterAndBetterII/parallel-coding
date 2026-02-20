@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
-use crate::cli::{AgentNewArgs, AgentRmArgs};
+use crate::cli::{NewArgs as AgentNewArgs, RmArgs as AgentRmArgs};
 use crate::exec;
 use crate::git;
 use crate::meta::{self, AgentMeta};
@@ -11,15 +11,40 @@ use crate::vscode;
 
 use pc_cli::agent_name::{derive_agent_name_from_branch, is_valid_agent_name};
 
-pub(crate) fn cmd_agent_new(args: AgentNewArgs) -> Result<()> {
+pub(crate) fn cmd_new(args: AgentNewArgs) -> Result<()> {
     exec::ensure_in_path("git")?;
 
     if !git::has_commit()? {
         bail!(
             "This git repository has no commits yet (unborn HEAD). \
-Create an initial commit, then re-run `pc agent new ...`."
+Create an initial commit, then re-run `pc new ...`."
         );
     }
+
+    let base_ref = match resolve_base_ref(&args)? {
+        Some(v) => v,
+        None => {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    };
+
+    let branch_name = match args.branch_name.clone() {
+        Some(v) => v,
+        None => {
+            if args.base.is_some() || args.select_base {
+                prompt_new_branch_name(&base_ref)?
+            } else {
+                match select_target_branch_tui()? {
+                    Some(v) => v,
+                    None => {
+                        println!("Cancelled.");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    };
 
     let repo_root = git::repo_root()?;
     let repo_name = repo_root
@@ -32,7 +57,6 @@ Create an initial commit, then re-run `pc agent new ...`."
     std::fs::create_dir_all(&worktree_base_dir)
         .with_context(|| format!("Failed to create base dir: {}", worktree_base_dir.display()))?;
 
-    let branch_name = args.branch_name.clone();
     git::ensure_branch_name_valid(&branch_name)?;
 
     let agent_name = match args.agent_name {
@@ -45,38 +69,83 @@ Create an initial commit, then re-run `pc agent new ...`."
         None => derive_agent_name_from_branch(&branch_name)?,
     };
 
+    if let Some(existing) = git::worktree_path_for_branch(&branch_name)? {
+        eprintln!(
+            "Warning: worktree for branch already exists. Opening: {}",
+            existing.display()
+        );
+        return reopen_existing_worktree(&branch_name, &agent_name, &existing, args.no_open);
+    }
+
     let worktree_dir_raw = worktree_base_dir.join(&agent_name);
     if worktree_dir_raw.exists() {
-        bail!(
-            "Worktree path already exists: {}",
+        if let Some(entry) = git::worktree_entry_for_path(&worktree_dir_raw)? {
+            if let Some(existing_ref) = entry.branch.as_deref() {
+                let wanted_ref = format!("refs/heads/{branch_name}");
+                if existing_ref != wanted_ref {
+                    bail!(
+                        "Worktree path already exists for a different branch: {} (existing: {})",
+                        worktree_dir_raw.display(),
+                        existing_ref
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(existing_ref)
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "Warning: worktree path already exists. Opening: {}",
             worktree_dir_raw.display()
+        );
+        return reopen_existing_worktree(
+            &branch_name,
+            &agent_name,
+            &worktree_dir_raw,
+            args.no_open,
         );
     }
 
     if let Some(existing) = git::worktree_path_for_basename(&agent_name)? {
-        bail!(
-            "A worktree directory with the same name already exists: {}",
+        if let Some(entry) = git::worktree_entry_for_path(&existing)? {
+            if let Some(existing_ref) = entry.branch.as_deref() {
+                let wanted_ref = format!("refs/heads/{branch_name}");
+                if existing_ref != wanted_ref {
+                    bail!(
+                        "A worktree directory with the same name already exists for a different branch: {} (existing: {})",
+                        existing.display(),
+                        existing_ref.strip_prefix("refs/heads/").unwrap_or(existing_ref)
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "Warning: worktree directory name already exists. Opening: {}",
             existing.display()
         );
-    }
-    if let Some(existing) = git::worktree_path_for_branch(&branch_name)? {
-        bail!(
-            "Worktree for branch {} already exists at: {}",
-            branch_name,
-            existing.display()
-        );
+        return reopen_existing_worktree(&branch_name, &agent_name, &existing, args.no_open);
     }
 
-    if args.select_base && args.base.is_some() {
-        bail!("Use either --base or --select-base, not both.");
-    }
-
-    let base_ref = if args.select_base {
-        select_base_branch_tui()?
-    } else {
-        args.base.clone().unwrap_or_else(|| "HEAD".to_string())
-    };
     git::ensure_ref_exists(&base_ref)?;
+
+    let branch_exists = git::branch_exists_local(&branch_name)?;
+    if !branch_exists {
+        if exec::can_prompt() {
+            eprintln!("Warning: branch does not exist: {branch_name}");
+            let ok = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Create new branch {branch_name} from {base_ref}?"))
+                .default(true)
+                .interact()
+                .context("Prompt failed")?;
+            if !ok {
+                println!("Cancelled. Branch not created: {branch_name}");
+                return Ok(());
+            }
+        } else {
+            eprintln!(
+                "Warning: branch does not exist: {branch_name}. Creating it from {base_ref}."
+            );
+        }
+    }
 
     let created_branch = git::worktree_add(&worktree_dir_raw, &branch_name, &base_ref)?;
 
@@ -128,7 +197,64 @@ Create an initial commit, then re-run `pc agent new ...`."
     Ok(())
 }
 
-pub(crate) fn cmd_agent_rm(args: AgentRmArgs) -> Result<()> {
+fn resolve_base_ref(args: &AgentNewArgs) -> Result<Option<String>> {
+    if args.select_base && args.base.is_some() {
+        bail!("Use either --base or --select-base, not both.");
+    }
+
+    if args.select_base {
+        return select_base_branch_tui();
+    }
+
+    match args.base.clone() {
+        Some(v) if v == "__tui__" => select_base_branch_tui(),
+        Some(v) => Ok(Some(v)),
+        None => Ok(Some("HEAD".to_string())),
+    }
+}
+
+fn prompt_new_branch_name(base_ref: &str) -> Result<String> {
+    if !dialoguer::console::Term::stdout().is_term() {
+        bail!("No branch specified and no TTY available. Pass a branch name: `pc new <branch>`.");
+    }
+
+    let branch = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("New branch name (base: {base_ref})"))
+        .validate_with(|s: &String| {
+            if s.trim().is_empty() {
+                return Err("Branch name cannot be empty".to_string());
+            }
+            Ok(())
+        })
+        .interact_text()
+        .context("Prompt failed")?;
+
+    Ok(branch.trim().to_string())
+}
+
+fn reopen_existing_worktree(
+    branch_name: &str,
+    agent_name: &str,
+    worktree_dir: &Path,
+    no_open: bool,
+) -> Result<()> {
+    let worktree_dir =
+        std::fs::canonicalize(worktree_dir).unwrap_or_else(|_| worktree_dir.to_path_buf());
+    if agent_name != branch_name {
+        println!("Agent:    {agent_name}");
+    }
+    println!("Worktree: {}", worktree_dir.display());
+    println!("Branch:   {branch_name}");
+
+    if !no_open && exec::is_in_path("code") {
+        if let Err(e) = vscode::open_vscode_local(&worktree_dir) {
+            eprintln!("Warning: failed to open VS Code: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_rm(args: AgentRmArgs) -> Result<()> {
     exec::ensure_in_path("git")?;
 
     let repo_root = git::repo_root()?;
@@ -239,9 +365,9 @@ fn rollback_failed_agent_new(
     Ok(())
 }
 
-fn select_base_branch_tui() -> Result<String> {
+fn select_base_branch_tui() -> Result<Option<String>> {
     if !dialoguer::console::Term::stdout().is_term() {
-        bail!("--select-base requires a TTY");
+        bail!("Interactive base selection requires a TTY");
     }
 
     let branches = git::local_branches_by_recent()?;
@@ -257,7 +383,30 @@ fn select_base_branch_tui() -> Result<String> {
         .with_prompt("Select base branch")
         .items(&items)
         .default(0)
-        .interact()
+        .interact_opt()
         .context("TUI selection failed")?;
-    Ok(branches[selection].name.clone())
+    Ok(selection.map(|idx| branches[idx].name.clone()))
+}
+
+fn select_target_branch_tui() -> Result<Option<String>> {
+    if !dialoguer::console::Term::stdout().is_term() {
+        bail!("No branch specified and no TTY available. Pass a branch name: `pc new <branch>`.");
+    }
+
+    let branches = git::local_branches_by_recent()?;
+    if branches.is_empty() {
+        bail!("No local branches found");
+    }
+
+    let items: Vec<String> = branches
+        .iter()
+        .map(|b| format!("{}  ({})", b.name, b.committer_date))
+        .collect();
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select branch to open as worktree")
+        .items(&items)
+        .default(0)
+        .interact_opt()
+        .context("TUI selection failed")?;
+    Ok(selection.map(|idx| branches[idx].name.clone()))
 }

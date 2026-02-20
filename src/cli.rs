@@ -14,9 +14,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Create a git worktree + branch (alias of `pc agent new`)
-    New(AgentNewArgs),
-    /// Git worktree based agent workflows
+    /// Create a git worktree + branch
+    New(NewArgs),
+    /// Remove a worktree (git worktree remove)
+    Rm(RmArgs),
+    /// Backward-compatible alias (hidden)
+    #[command(hide = true)]
     Agent(AgentArgs),
 }
 
@@ -29,20 +32,22 @@ struct AgentArgs {
 #[derive(Subcommand, Debug)]
 enum AgentCommands {
     /// Create a git worktree + branch
-    New(AgentNewArgs),
-    /// Remove an agent (git worktree remove)
-    Rm(AgentRmArgs),
+    New(NewArgs),
+    /// Remove a worktree (git worktree remove)
+    Rm(RmArgs),
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct AgentNewArgs {
-    /// Branch name to create/use (can include `/`, e.g. `feat/tui-templates`)
-    pub(crate) branch_name: String,
+pub(crate) struct NewArgs {
+    /// Branch name to create/use (can include `/`, e.g. `feat/tui-templates`).
+    /// If omitted (TTY only), a TUI selector will be shown.
+    pub(crate) branch_name: Option<String>,
     /// Override the derived agent name (used for worktree directory and metadata lookup)
     #[arg(long = "agent-name")]
     pub(crate) agent_name: Option<String>,
-    /// Base branch/ref for the new worktree branch (default: current HEAD)
-    #[arg(long)]
+    /// Base branch/ref for the new worktree branch (default: current HEAD).
+    /// Pass `--base` without a value to select interactively (TTY only).
+    #[arg(long, num_args = 0..=1, default_missing_value = "__tui__")]
     pub(crate) base: Option<String>,
     /// Select base branch with an interactive TUI (sorted by recent updates)
     #[arg(long)]
@@ -56,7 +61,7 @@ pub(crate) struct AgentNewArgs {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct AgentRmArgs {
+pub(crate) struct RmArgs {
     /// Branch name (or agent name) to remove
     pub(crate) branch_name: String,
     /// Override the derived agent name (used for default worktree path and metadata lookup)
@@ -73,10 +78,11 @@ pub(crate) struct AgentRmArgs {
 pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::New(args) => commands::agent::cmd_agent_new(args),
+        Commands::New(args) => commands::agent::cmd_new(args),
+        Commands::Rm(args) => commands::agent::cmd_rm(args),
         Commands::Agent(args) => match args.command {
-            AgentCommands::New(a) => commands::agent::cmd_agent_new(a),
-            AgentCommands::Rm(a) => commands::agent::cmd_agent_rm(a),
+            AgentCommands::New(a) => commands::agent::cmd_new(a),
+            AgentCommands::Rm(a) => commands::agent::cmd_rm(a),
         },
     }
 }

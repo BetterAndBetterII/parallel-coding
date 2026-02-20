@@ -45,7 +45,6 @@ mod unix_only {
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
             .args([
-                "agent",
                 "new",
                 "feat/a",
                 "--no-open",
@@ -60,13 +59,7 @@ mod unix_only {
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .args([
-                "agent",
-                "rm",
-                "feat/a",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
+            .args(["rm", "feat/a", "--base-dir", agents.to_str().unwrap()])
             .assert()
             .success();
 
@@ -92,7 +85,6 @@ mod unix_only {
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
             .args([
-                "agent",
                 "new",
                 "feat/a",
                 "--no-open",
@@ -116,13 +108,7 @@ mod unix_only {
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .args([
-                "agent",
-                "rm",
-                "feat/a",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
+            .args(["rm", "feat/a", "--base-dir", agents.to_str().unwrap()])
             .assert()
             .success();
 
@@ -130,13 +116,7 @@ mod unix_only {
 
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
-            .args([
-                "agent",
-                "rm",
-                "feat/a",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
+            .args(["rm", "feat/a", "--base-dir", agents.to_str().unwrap()])
             .assert()
             .failure()
             .stderr(contains("Agent worktree not found"));

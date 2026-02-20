@@ -89,18 +89,12 @@ exit 0
             .current_dir(&repo)
             .env("PC_CODE_LOG", &code_log)
             .env("PATH", prepend_path(&stub_bin))
-            .args([
-                "agent",
-                "new",
-                "agent-a",
-                "--base-dir",
-                agents.to_str().unwrap(),
-            ])
+            .args(["new", "agent-a", "--base-dir", agents.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(
             output.status.success(),
-            "pc agent new failed: stdout:\n{}\nstderr:\n{}",
+            "pc new failed: stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -129,7 +123,7 @@ exit 0
         let agents = td.path().join("agents");
         fs::create_dir_all(&agents).unwrap();
 
-        // Make the metadata *file path* a directory so `pc agent new` fails after creating the worktree.
+        // Make the metadata *file path* a directory so `pc new` fails after creating the worktree.
         let out = StdCommand::new("git")
             .current_dir(&repo)
             .args([
@@ -147,7 +141,6 @@ exit 0
         Command::new(assert_cmd::cargo::cargo_bin!("pc"))
             .current_dir(&repo)
             .args([
-                "agent",
                 "new",
                 "agent-a",
                 "--no-open",

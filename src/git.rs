@@ -60,13 +60,17 @@ pub(crate) fn ensure_branch_name_valid(name: &str) -> Result<()> {
     }
 }
 
-pub(crate) fn worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<bool> {
+pub(crate) fn branch_exists_local(branch_name: &str) -> Result<bool> {
     let ref_name = format!("refs/heads/{branch_name}");
-    let branch_exists = Command::new("git")
+    Ok(Command::new("git")
         .args(["show-ref", "--verify", "--quiet", &ref_name])
         .status()
         .map(|s| s.success())
-        .unwrap_or(false);
+        .unwrap_or(false))
+}
+
+pub(crate) fn worktree_add(worktree_dir: &Path, branch_name: &str, base_ref: &str) -> Result<bool> {
+    let branch_exists = branch_exists_local(branch_name)?;
 
     let mut cmd = Command::new("git");
     if branch_exists {
@@ -220,6 +224,68 @@ pub(crate) fn worktree_path_for_basename(name: &str) -> Result<Option<PathBuf>> 
             if p.file_name().and_then(|s| s.to_str()) == Some(name) {
                 return Ok(Some(p));
             }
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorktreeEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) branch: Option<String>,
+}
+
+pub(crate) fn worktrees() -> Result<Vec<WorktreeEntry>> {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .context("Failed to run git worktree list")?;
+    if !output.status.success() {
+        bail!("git worktree list failed");
+    }
+    let text = String::from_utf8(output.stdout).context("git output not utf8")?;
+
+    let mut out = Vec::new();
+    let mut current: Option<WorktreeEntry> = None;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            if let Some(e) = current.take() {
+                out.push(e);
+            }
+            current = Some(WorktreeEntry {
+                path: PathBuf::from(rest.trim()),
+                branch: None,
+            });
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("branch ") {
+            if let Some(e) = current.as_mut() {
+                e.branch = Some(rest.trim().to_string());
+            }
+            continue;
+        }
+        if line.trim() == "detached" {
+            if let Some(e) = current.as_mut() {
+                e.branch = None;
+            }
+            continue;
+        }
+    }
+
+    if let Some(e) = current.take() {
+        out.push(e);
+    }
+
+    Ok(out)
+}
+
+pub(crate) fn worktree_entry_for_path(path: &Path) -> Result<Option<WorktreeEntry>> {
+    let wanted = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for e in worktrees()? {
+        let p = std::fs::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone());
+        if p == wanted {
+            return Ok(Some(e));
         }
     }
     Ok(None)
