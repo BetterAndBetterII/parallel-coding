@@ -70,9 +70,16 @@ pc new feat/codex --base main
 pc rm feat/codex
 ```
 
+或不传分支名（仅 TTY），从现有 worktree 列表中选择：
+
+```bash
+pc rm
+```
+
 说明：
 
 - `pc rm` **只删除 worktree**，不会删除对应的 git 分支（如需删除可手动 `git branch -D <branch>`）。
+- 为避免误删，在 TTY 下会进行二次确认（确认 + 需要手动输入一次目标名称）。
 - 如果 worktree 里存在未提交的修改或未追踪文件，`git worktree remove` 可能会提示需要 `--force`；`pc` 会展示 `git status --porcelain` 并让你选择是否重试（默认 `no`）。
 
 ## 测试

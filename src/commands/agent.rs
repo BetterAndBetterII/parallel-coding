@@ -257,6 +257,13 @@ fn reopen_existing_worktree(
 pub(crate) fn cmd_rm(args: AgentRmArgs) -> Result<()> {
     exec::ensure_in_path("git")?;
 
+    let AgentRmArgs {
+        branch_name: arg_branch_name,
+        agent_name: arg_agent_name,
+        base_dir,
+        force,
+    } = args;
+
     let repo_root = git::repo_root()?;
     let repo_name = repo_root
         .file_name()
@@ -264,36 +271,69 @@ pub(crate) fn cmd_rm(args: AgentRmArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("Failed to get repo name from path: {}", repo_root.display()))?
         .to_string();
 
-    let worktree_base_dir = resolve_worktree_base_dir(&repo_root, &repo_name, args.base_dir)?;
+    let worktree_base_dir = resolve_worktree_base_dir(&repo_root, &repo_name, base_dir)?;
 
-    let branch_name = args.branch_name.clone();
-    git::ensure_branch_name_valid(&branch_name)?;
+    if arg_branch_name.is_none() && arg_agent_name.is_some() {
+        bail!("--agent-name requires an explicit branch name (or select a worktree and omit --agent-name).");
+    }
 
-    let agent_name = match args.agent_name {
-        Some(v) => {
-            if !is_valid_agent_name(&v) {
-                bail!("agent-name must match: [A-Za-z0-9._-]+ (and cannot be '.' or '..')");
-            }
-            v
+    let (branch_name, agent_name, worktree_dir_raw, should_remove_meta) = match arg_branch_name {
+        Some(branch_name) => {
+            git::ensure_branch_name_valid(&branch_name)?;
+
+            let agent_name = match arg_agent_name {
+                Some(v) => {
+                    if !is_valid_agent_name(&v) {
+                        bail!("agent-name must match: [A-Za-z0-9._-]+ (and cannot be '.' or '..')");
+                    }
+                    v
+                }
+                None => derive_agent_name_from_branch(&branch_name)?,
+            };
+
+            let expected_dir = worktree_base_dir.join(&agent_name);
+            let worktree_dir = if expected_dir.exists() {
+                expected_dir
+            } else if let Some(p) = git::worktree_path_for_branch(&branch_name)? {
+                p
+            } else {
+                bail!(
+                    "Agent worktree not found. Expected path: {} (branch: {})",
+                    expected_dir.display(),
+                    branch_name
+                );
+            };
+
+            (Some(branch_name), agent_name, worktree_dir, true)
         }
-        None => derive_agent_name_from_branch(&branch_name)?,
+        None => {
+            let selected = select_worktree_to_remove_tui(&repo_root, &worktree_base_dir)?;
+            let Some(selected) = selected else {
+                println!("Cancelled.");
+                return Ok(());
+            };
+            (
+                selected.branch_name,
+                selected.agent_name,
+                selected.path,
+                selected.should_remove_meta,
+            )
+        }
     };
 
-    let expected_dir = worktree_base_dir.join(&agent_name);
-    let worktree_dir = if expected_dir.exists() {
-        expected_dir
-    } else if let Some(p) = git::worktree_path_for_branch(&branch_name)? {
-        p
-    } else {
-        bail!(
-            "Agent worktree not found. Expected path: {} (branch: {})",
-            expected_dir.display(),
-            branch_name
-        );
-    };
+    let worktree_dir = std::fs::canonicalize(&worktree_dir_raw)
+        .with_context(|| format!("Failed to resolve {}", worktree_dir_raw.display()))?;
 
-    let worktree_dir = std::fs::canonicalize(&worktree_dir)
-        .with_context(|| format!("Failed to resolve {}", worktree_dir.display()))?;
+    if exec::can_prompt() {
+        let ok = confirm_double_rm(&worktree_dir, branch_name.as_deref(), &agent_name)?;
+        if !ok {
+            println!(
+                "Cancelled. Worktree not removed: {}",
+                worktree_dir.display()
+            );
+            return Ok(());
+        }
+    }
 
     // Best-effort: ignore typical generated dirs so `git worktree remove` doesn't
     // require `--force` after normal local development (e.g. uv creates .venv).
@@ -303,7 +343,7 @@ pub(crate) fn cmd_rm(args: AgentRmArgs) -> Result<()> {
     git::ensure_exclude(&worktree_dir, ".pytest_cache/")?;
     git::ensure_exclude(&worktree_dir, ".ruff_cache/")?;
 
-    let removed = git::worktree_remove(&worktree_dir, args.force)?;
+    let removed = git::worktree_remove(&worktree_dir, force)?;
     if !removed {
         println!(
             "Cancelled. Worktree not removed: {}",
@@ -312,10 +352,143 @@ pub(crate) fn cmd_rm(args: AgentRmArgs) -> Result<()> {
         return Ok(());
     }
 
-    meta::remove_agent_meta(&agent_name)?;
+    if should_remove_meta {
+        meta::remove_agent_meta(&agent_name)?;
+    } else {
+        eprintln!(
+            "Warning: selected worktree is outside the configured base dir; skipping metadata removal for agent {agent_name}"
+        );
+    }
 
-    println!("Removed agent {agent_name}");
+    if let Some(branch_name) = branch_name.as_deref() {
+        println!("Removed worktree for {branch_name}");
+    } else {
+        println!("Removed worktree {}", worktree_dir.display());
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SelectedWorktree {
+    path: PathBuf,
+    branch_name: Option<String>,
+    agent_name: String,
+    should_remove_meta: bool,
+}
+
+fn select_worktree_to_remove_tui(
+    repo_root: &Path,
+    worktree_base_dir: &Path,
+) -> Result<Option<SelectedWorktree>> {
+    if !dialoguer::console::Term::stdout().is_term() {
+        bail!("No worktree specified and no TTY available. Pass a branch name: `pc rm <branch>`.");
+    }
+
+    let repo_root = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let base = std::fs::canonicalize(worktree_base_dir)
+        .unwrap_or_else(|_| worktree_base_dir.to_path_buf());
+
+    let worktrees = git::worktrees()?;
+    let mut candidates: Vec<git::WorktreeEntry> = worktrees
+        .into_iter()
+        .filter(|e| {
+            let p = std::fs::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone());
+            p != repo_root && p.starts_with(&base)
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        let worktrees = git::worktrees()?;
+        candidates = worktrees
+            .into_iter()
+            .filter(|e| {
+                let p = std::fs::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone());
+                p != repo_root
+            })
+            .collect();
+    }
+
+    if candidates.is_empty() {
+        bail!("No removable worktrees found in this repository");
+    }
+
+    candidates.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let items: Vec<String> = candidates
+        .iter()
+        .map(|e| {
+            let branch = e
+                .branch
+                .as_deref()
+                .and_then(|s| s.strip_prefix("refs/heads/"))
+                .unwrap_or("(detached)");
+            format!("{branch}  —  {}", e.path.display())
+        })
+        .collect();
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select worktree to remove")
+        .items(&items)
+        .default(0)
+        .interact_opt()
+        .context("TUI selection failed")?;
+
+    let Some(idx) = selection else {
+        return Ok(None);
+    };
+
+    let chosen = candidates[idx].clone();
+    let path = chosen.path;
+
+    let agent_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("Failed to derive agent name from path: {}", path.display()))?
+        .to_string();
+
+    let branch_name = chosen
+        .branch
+        .as_deref()
+        .and_then(|s| s.strip_prefix("refs/heads/"))
+        .map(|s| s.to_string());
+
+    let should_remove_meta = {
+        let resolved_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let expected = base.join(&agent_name);
+        resolved_path == expected
+    };
+
+    Ok(Some(SelectedWorktree {
+        path,
+        branch_name,
+        agent_name,
+        should_remove_meta,
+    }))
+}
+
+fn confirm_double_rm(worktree_dir: &Path, branch_name: Option<&str>, agent_name: &str) -> Result<bool> {
+    let label = branch_name.unwrap_or(agent_name);
+    let mut prompt = format!("Remove worktree: {}", worktree_dir.display());
+    if let Some(b) = branch_name {
+        prompt.push_str(&format!(" (branch: {b})"));
+    }
+
+    let ok = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .default(false)
+        .interact()
+        .context("Prompt failed")?;
+    if !ok {
+        return Ok(false);
+    }
+
+    let typed = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Type '{label}' to confirm"))
+        .default("".to_string())
+        .interact_text()
+        .context("Prompt failed")?;
+
+    Ok(typed.trim() == label)
 }
 
 fn resolve_worktree_base_dir(

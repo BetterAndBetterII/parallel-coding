@@ -121,4 +121,18 @@ mod unix_only {
             .failure()
             .stderr(contains("Agent worktree not found"));
     }
+
+    #[test]
+    fn agent_rm_without_args_requires_tty_or_branch_name() {
+        let td = TempDir::new().unwrap();
+        let repo = td.path().join("repo");
+        common::init_repo(&repo);
+
+        Command::new(assert_cmd::cargo::cargo_bin!("pc"))
+            .current_dir(&repo)
+            .args(["rm"])
+            .assert()
+            .failure()
+            .stderr(contains("No worktree specified and no TTY available"));
+    }
 }

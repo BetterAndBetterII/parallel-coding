@@ -62,8 +62,9 @@ pub(crate) struct NewArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct RmArgs {
-    /// Branch name (or agent name) to remove
-    pub(crate) branch_name: String,
+    /// Branch name (or agent name) to remove.
+    /// If omitted (TTY only), a TUI selector will be shown.
+    pub(crate) branch_name: Option<String>,
     /// Override the derived agent name (used for default worktree path and metadata lookup)
     #[arg(long = "agent-name")]
     pub(crate) agent_name: Option<String>,
