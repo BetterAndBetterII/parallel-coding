@@ -27,7 +27,7 @@
 
 ## 编码风格与命名约定
 
-- Rust 2021；保持与 `Cargo.toml` 的 `rust-version` 兼容（当前为 `1.74.1`）。
+- Rust 2021；保持与 `Cargo.toml` 的 `rust-version` 兼容（当前为 `1.85`）。
 - 错误处理优先 `anyhow` + `.context(...)` 补足上下文，避免静默降级/吞错。
 - 命名：模块/函数 `snake_case`；类型/trait `CamelCase`；常量 `SCREAMING_SNAKE_CASE`。
 

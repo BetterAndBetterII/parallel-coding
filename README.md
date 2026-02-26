@@ -31,6 +31,8 @@ cargo install --path .
 
 安装后可在任意目录使用：`pc --help`
 
+> 提示：本仓库提供 `rust-toolchain.toml`，用 `rustup` 时会自动选择并安装对应工具链。
+
 ## 依赖
 
 - `git`
@@ -89,6 +91,12 @@ pc rm
 ```bash
 cargo test --locked
 ```
+
+也可以用本仓库的 cargo alias：
+
+- `cargo fmt-check`
+- `cargo lint`
+- `cargo test-locked`
 
 覆盖率（需要 `llvm-tools-preview` + `cargo-llvm-cov`）：
 
