@@ -466,7 +466,11 @@ fn select_worktree_to_remove_tui(
     }))
 }
 
-fn confirm_double_rm(worktree_dir: &Path, branch_name: Option<&str>, agent_name: &str) -> Result<bool> {
+fn confirm_double_rm(
+    worktree_dir: &Path,
+    branch_name: Option<&str>,
+    agent_name: &str,
+) -> Result<bool> {
     let label = branch_name.unwrap_or(agent_name);
     let mut prompt = format!("Remove worktree: {}", worktree_dir.display());
     if let Some(b) = branch_name {
